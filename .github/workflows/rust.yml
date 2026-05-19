@@ -22,6 +22,10 @@ env:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tag/v') && github.ref != 'refs/head/main' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
