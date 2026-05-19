@@ -1,0 +1,19 @@
+{
+  "id": "test-family",
+  "family": "Test Family",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "defSubset": "latin",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "{{TTF_URL}}"
+          }
+        }
+      }
+    }
+  }
+}
