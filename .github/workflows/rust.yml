@@ -1,8 +1,5 @@
 name: Rust
 
-permissions:
-  contents: read
-
 on:
   push:
     branches: [main]
@@ -22,6 +19,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+
+permissions: {}
 
 jobs:
   test:
