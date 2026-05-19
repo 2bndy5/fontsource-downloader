@@ -50,10 +50,6 @@ def bump-version [
         | first
     )
     print $"bumped ($result | get old) to ($result | get new)"
-    cd bindings/node
-    ^yarn version ($result | get new)
-    print 'Updated version in bindings/node/package.json'
-    cd '../..'
     print "Updating Cargo.lock file"
     if (not $IN_CI) {
         ^cargo update --workspace

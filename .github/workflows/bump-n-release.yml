@@ -35,12 +35,6 @@ jobs:
           fetch-tags: true
           persist-credentials: true # allow `git push`
 
-      - name: Setup yarn
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: yarn
-
       - uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
       - run: cargo binstall -y git-cliff nu
         env:
@@ -50,7 +44,6 @@ jobs:
           cargo-edit
           --no-default-features
           --features set-version
-      - run: yarn install
 
       - name: Bump ${{ inputs.component }} version
         env:
