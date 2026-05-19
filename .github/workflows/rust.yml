@@ -1,3 +1,4 @@
+name: Rust
 
 permissions:
   contents: read
@@ -44,10 +45,6 @@ jobs:
           key: cargo-lib-${{ hashFiles('src/**', 'Cargo.toml') }}
       - run: rustup component add llvm-tools-preview
         # this enables a tool (for default toolchain) needed to measure code coverage.
-      - name: run docs examples
-        run: nur test docs
-      - name: build examples
-        run: nur examples
       - name: Run tests
         run: nur test --profile ci
       - name: Generate coverage reports

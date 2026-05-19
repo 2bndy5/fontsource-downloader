@@ -1,8 +1,10 @@
 version: "0.2"
 words:
+  - armhf
   - armv
   - asyncio
   - binstall
+  - binutils
   - bndy
   - cdylib
   - clippy
@@ -10,11 +12,13 @@ words:
   - Doherty
   - endfor
   - endmacro
+  - esac
   - fontlist
   - fontsource
   - gnueabi
   - gnueabihf
   - hustcer
+  - libc
   - manylinux
   - maturin
   - msvc

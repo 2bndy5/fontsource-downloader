@@ -18,7 +18,7 @@ body = """
   https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}
 {%- endmacro -%}
 {%- set UNRELEASED = "Unreleased" -%}
-{%- set init_commit = "f8863cc36d66708bfa0fb2fb1a219c7b2f97f7d6" -%}
+{%- set init_commit = "188040029d21b91576697d4015904a92f85f0e78" -%}
 {%- set this_version = UNRELEASED -%}
 
 {% if version -%}
