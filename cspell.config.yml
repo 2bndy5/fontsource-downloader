@@ -50,3 +50,4 @@ ignorePaths:
   - .gitignore
   - .gitattributes
   - tests/*.json
+  - CHANGELOG.md
