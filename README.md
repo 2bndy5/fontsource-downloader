@@ -19,13 +19,14 @@ A library to download (and cache) fonts with [fontsource] REST API.
 ### Python
 
 ```python
-import asyncio # only supported async runtime in python
+import asyncio # the only supported async runtime in python
+from pathlib import Path
 from fontsource_downloader import FontQuery, FontSourceClient, Weight
 
 client = FontSourceClient()
 query = FontQuery(
-    family: "Roboto",
-    weight: Weight.Normal,
+    family="Roboto",
+    weight=Weight.Normal,
 )
 font_file: Path = await client.download_font(&query)
 # do what you want with the cached font file ...

@@ -25,6 +25,7 @@ words:
   - mypy
   - nextest
   - nurfile
+  - pathlib
   - pipx
   - prek
   - pyclass
