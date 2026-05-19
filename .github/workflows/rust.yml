@@ -1,0 +1,105 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.rs"
+      - Cargo.toml
+      - .github/workflows/rust.yml
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.rs"
+      - Cargo.toml
+      - .github/workflows/rust.yml
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tag/v') && github.ref != 'refs/head/main' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        run: rustup update --no-self-update
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@0b24824336e2b3800b0f89d9e08b2c08bfa3dcdd # v1.17.9
+      - name: Install cargo-llvm-cov, cargo-nextest, and nur
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo binstall -y cargo-nextest cargo-llvm-cov nur --locked
+      - name: Cache deps
+        uses: actions/cache@v5 # zizmor: ignore[cache-poisoning]
+        with:
+          path: ~/.cargo
+          key: cargo-lib-${{ hashFiles('src/**', 'Cargo.toml') }}
+      - run: rustup component add llvm-tools-preview
+        # this enables a tool (for default toolchain) needed to measure code coverage.
+      - name: Run tests
+        run: nur test --profile ci
+      - name: Generate coverage reports
+        run: nur test lcov
+      - name: Upload coverage reports as artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov.info
+          path: lcov.info
+
+  coverage:
+    needs: [test]
+    runs-on: ubuntu-latest
+    environment:
+      name: test-coverage
+      url: https://app.codecov.io/gh/2bndy5/fontsource-downloader
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Download coverage reports
+        uses: actions/download-artifact@v8
+        with:
+          name: lcov.info
+          path: lcov.info
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true
+
+  deploy:
+    needs: [test]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: release
+      url: https://crates.io/crates/fontsource-downloader
+    permissions:
+      # Required for OIDC token exchange
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        run: rustup update --no-self-update
+      - name: Establish trusted publishing token
+        uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
+        id: auth
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish
