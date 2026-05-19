@@ -2,6 +2,7 @@
 
 [![Python][python-ci-badge]][python-ci-link]
 [![Rust][rust-ci-badge]][rust-ci-link]
+[![codecov][coverage-badge]][coverage-link]
 [![docs.rs][docs-badge]][docs-link]
 [![Crates.io][crates-io-badge]][crates-io-link]
 [![PyPI][pypi-badge]][pypi-link]
@@ -57,3 +58,5 @@ let font_file: PathBuf = client.download_font(&query).await.unwrap();
 [crates-io-link]: https://crates.io/crates/fontsource-downloader
 [pypi-badge]: https://img.shields.io/pypi/v/fontsource-downloader
 [pypi-link]:https://pypi.org/project/fontsource-downloader
+[coverage-badge]: https://codecov.io/gh/2bndy5/fontsource-downloader/graph/badge.svg?token=4OQA5DWNJC
+[coverage-link]: https://codecov.io/gh/2bndy5/fontsource-downloader
