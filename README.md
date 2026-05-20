@@ -53,10 +53,10 @@ let font_file: PathBuf = client.download_font(&query).await.unwrap();
 [python-ci-link]: https://github.com/2bndy5/fontsource-downloader/actions/workflows/python.yml
 [rust-ci-badge]: https://github.com/2bndy5/fontsource-downloader/actions/workflows/rust.yml/badge.svg
 [rust-ci-link]: https://github.com/2bndy5/fontsource-downloader/actions/workflows/rust.yml
-[docs-badge]: https://img.shields.io/docsrs/fontsource-downloader
-[docs-link]: https://docs.rs/fontsource-downloader
-[crates-io-badge]: https://img.shields.io/crates/v/fontsource-downloader
-[crates-io-link]: https://crates.io/crates/fontsource-downloader
+[docs-badge]: https://img.shields.io/docsrs/fontsource_downloader
+[docs-link]: https://docs.rs/fontsource_downloader
+[crates-io-badge]: https://img.shields.io/crates/v/fontsource_downloader
+[crates-io-link]: https://crates.io/crates/fontsource_downloader
 [pypi-badge]: https://img.shields.io/pypi/v/fontsource-downloader
 [pypi-link]:https://pypi.org/project/fontsource-downloader
 [coverage-badge]: https://codecov.io/gh/2bndy5/fontsource-downloader/graph/badge.svg?token=4OQA5DWNJC
