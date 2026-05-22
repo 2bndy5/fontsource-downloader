@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- markdownlint-disable MD024 -->
 
+## [0.2.0] - 2026-05-22
+
+### <!-- 1 --> 🚀 Added
+
+- Expose cached metadata by @2bndy5 in [#6](https://github.com/2bndy5/fontsource-downloader/pull/6)
+
+### <!-- 8 --> 📝 Documentation
+
+- Fix python example in README by @2bndy5 in [`5f3eb21`](https://github.com/2bndy5/fontsource-downloader/commit/5f3eb218bb120ff0eeadeda981babd8774af0d67)
+- Fix badges in README by @2bndy5 in [`eeb09fb`](https://github.com/2bndy5/fontsource-downloader/commit/eeb09fb8c0677487b2acefff63eeb51711ee2f1d)
+
+[0.2.0]: https://github.com/2bndy5/fontsource-downloader/compare/v0.1.0...v0.2.0
+
+Full commit diff: [`v0.1.0...v0.2.0`][0.2.0]
+
 ## [0.1.0] - 2026-05-19
 
 ### <!-- 1 --> 🚀 Added
@@ -19,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump the uv group with 3 updates by @dependabot[bot] in [#3](https://github.com/2bndy5/fontsource-downloader/pull/3)
 - Bump git-cliff in /.github in the pip group by @dependabot[bot] in [#2](https://github.com/2bndy5/fontsource-downloader/pull/2)
 - Bump pygments from 2.19.2 to 2.20.0 by @dependabot[bot] in [#5](https://github.com/2bndy5/fontsource-downloader/pull/5)
+- Bump version to v0.1.0 by @2bndy5 in [`4315e5f`](https://github.com/2bndy5/fontsource-downloader/commit/4315e5fa7eace0eb7d071c77926b831096925df9)
 
 ### <!-- 9 --> 🗨️ Changed
 
