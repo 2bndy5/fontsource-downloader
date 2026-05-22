@@ -12,7 +12,19 @@ async def test_download_font(tmp_path: Path):
     assert path.is_file()
     assert path.suffix == ".ttf"
     assert path.exists()
-    print(f"Downloaded font to: {path}")
+
+    cached_list = client.font_list_cache_info()
+    assert cached_list.families
+    assert "Roboto" in list(cached_list.families.values())
+    family_id = cached_list.get_id_for_family("Roboto")
+    assert family_id is not None
+    cached_info = client.family_cache_info(family_id)
+    assert cached_info.family.family == "Roboto"
+    assert cached_info.family.variant_ttf_url(400, "normal", "latin") is not None
+    assert cached_info.family.weights
+    assert cached_info.family.styles
+    assert cached_info.family.subsets
+    assert cached_info.family.default_subset
 
 
 def test_weight_enum():

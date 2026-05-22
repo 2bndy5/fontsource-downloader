@@ -40,31 +40,17 @@ pub enum FontSourceError {
         family: String,
     },
 
-    /// Error when the requested font weight is not available for the requested family.
-    #[error("Fontsource family '{family}' does not provide weight {weight}")]
-    FontWeightNotAvailable {
+    /// Error when the requested font variant is not available for the requested family.
+    #[error("Fontsource family '{family}' does not provide {field} {requested_value}")]
+    FontVariantNotAvailable {
         /// The font family for which the requested weight is not available.
         family: String,
-        /// The requested weight that is not available for the requested family.
-        weight: u16,
-    },
-
-    /// Error when the requested font style is not available for the requested family.
-    #[error("Fontsource family '{family}' does not provide style '{style}'")]
-    FontStyleNotAvailable {
-        /// The font family for which the requested style is not available.
-        family: String,
-        /// The requested style that is not available for the requested family.
-        style: String,
-    },
-
-    /// Error when the requested font subset is not available for the requested family.
-    #[error("Fontsource family '{family}' does not provide subset '{subset}'")]
-    FontSubsetNotAvailable {
-        /// The font family for which the requested subset is not available.
-        family: String,
-        /// The requested subset that is not available for the requested family.
-        subset: String,
+        /// The field of the font variant for which the requested weight is not available.
+        ///
+        /// E.g. weight, style, subset
+        field: &'static str,
+        /// The requested value (as a string) that is not available for the requested family.
+        requested_value: String,
     },
 
     /// Error when failing to create a cache directory.
@@ -97,6 +83,16 @@ pub enum FontSourceError {
         source: std::io::Error,
     },
 
+    /// Error when reading cache files.
+    #[error("Failed to read cache file '{path}'")]
+    ReadCacheFileFailed {
+        /// The path of the cache file that failed to read.
+        path: PathBuf,
+        /// The underlying error from the file system.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Error when parsing Fontsource API responses.
     #[error("Failed to parse response payload about {task} from Fontsource")]
     ParseResponseFailed {
@@ -106,6 +102,10 @@ pub enum FontSourceError {
         #[source]
         source: serde_json::Error,
     },
+
+    /// Error when deserializing cache JSON files.
+    #[error("Failed to deserialize JSON file from cache")]
+    JsonError(#[from] serde_json::Error),
 
     /// Error when the cache lock file is poisoned.
     ///
@@ -118,6 +118,54 @@ pub enum FontSourceError {
         #[source]
         source: std::io::Error,
     },
+}
+
+#[cfg(feature = "pyo3")]
+impl From<FontSourceError> for pyo3::PyErr {
+    fn from(value: FontSourceError) -> pyo3::PyErr {
+        use pyo3::exceptions::*;
+
+        match &value {
+            FontSourceError::ClientBuildFailed { source: _ } => {
+                PyOSError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::MetadataRequestFailed {
+                request: _,
+                source: _,
+            } => PyRuntimeError::new_err(format!("{value:?}")),
+            FontSourceError::MetadataDecodeFailed {
+                request: _,
+                source: _,
+            } => PyValueError::new_err(format!("{value:?}")),
+            FontSourceError::FontFamilyNotFound { family: _ } => {
+                PyValueError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::FontVariantNotAvailable {
+                family: _,
+                field: _,
+                requested_value: _,
+            } => PyValueError::new_err(format!("{value:?}")),
+            FontSourceError::CreateFontCacheDirFailed { path: _, source: _ } => {
+                PyOSError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::FontDownloadFailed { url: _, source: _ } => {
+                PyRuntimeError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::WriteFileFailed { path: _, source: _ } => {
+                PyOSError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::ReadCacheFileFailed { path: _, source: _ } => {
+                PyOSError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::ParseResponseFailed { task: _, source: _ } => {
+                PyRuntimeError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::JsonError(_) => PyValueError::new_err(format!("{value:?}")),
+            FontSourceError::CacheLockPoisoned { path: _, source: _ } => {
+                PyOSError::new_err(format!("{value:?}"))
+            }
+        }
+    }
 }
 
 /// A convenient alias for results returned by FontSource client operations.

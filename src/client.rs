@@ -11,8 +11,8 @@ use std::{
 
 use crate::{
     caching::{
-        CACHE_LOCK_EXT, DEFAULT_METADATA_TTL, FAMILY_CACHE_FILE, FamilyMetadataCacheFile,
-        FontListCacheFile, default_cache_root, expires_at, now_unix, open_lock_file, parse_max_age,
+        CACHE_LOCK_EXT, DEFAULT_METADATA_TTL, FAMILY_CACHE_FILE, FamilyCacheInfo,
+        FontListCacheInfo, default_cache_root, expires_at, now_unix, open_lock_file, parse_max_age,
     },
     error::{FontSourceError, Result},
     query::FontQuery,
@@ -47,15 +47,23 @@ impl FontSourceClient {
     ///
     /// Throws an ``OSError`` if the client fails to initialize the (native) TLS backend.
     #[new]
+    #[pyo3(
+        signature = (cache_root=None),
+        text_signature = "(cache_root: Path | None = None) -> FontSourceClient"
+    )]
     pub fn new_py(cache_root: Option<PathBuf>) -> PyResult<Self> {
-        Self::with_cache_root(cache_root.unwrap_or_else(default_cache_root))
-            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+        Self::with_cache_root(cache_root.unwrap_or_else(default_cache_root)).map_err(PyErr::from)
     }
 
     /// Asynchronously download a font file matching the given query.
     ///
-    /// Returns the path to the downloaded font file.
-    /// Throws an ``OSError`` if the font could not be downloaded and/or the query is somehow invalid.
+    /// The `FontQuery.subset` field may be overridden with
+    /// the family's default subset if the requested subset is
+    /// not available for the `FontQuery.family`.
+    ///
+    /// Returns the `Path` to the downloaded font file.
+    /// Throws an exception if the font could not be downloaded and/or
+    /// the query is somehow invalid.
     ///
     /// This method automatically uses cached metadata and font files when available.
     /// To configure the cache location, pass a `Path` to the `FontSourceClient` constructor.
@@ -67,24 +75,34 @@ impl FontSourceClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let this = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            this.download_font(&font)
-                .await
-                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+            this.download_font(&font).await.map_err(PyErr::from)
         })
     }
 
-    /// Get the path to the cache directory for font families.
+    /// Get the cached list of font families.
     ///
-    /// This directory shall contain all cached fonts for each family in subdirectories.
-    #[pyo3(name = "families_cache_path")]
-    pub fn families_cache_path_py(&self) -> PathBuf {
-        self.families_cache_path()
+    /// Returns an error if
+    ///
+    /// - the cache was not previously populated with
+    ///   `FontSourceClient.download_font()`
+    /// - the cached JSON file was modified by external actors in a
+    ///   way that causes deserialization errors.
+    #[pyo3(name = "font_list_cache_info")]
+    pub fn font_list_cache_info_py(&self) -> PyResult<FontListCacheInfo> {
+        self.font_list_cache_info().map_err(PyErr::from)
     }
 
-    /// Get the path to the cache file for the list of font families.
-    #[pyo3(name = "font_list_cache_path")]
-    pub fn font_list_cache_path_py(&self) -> PathBuf {
-        self.font_list_cache_path()
+    /// Get the cache info for the specified font family.
+    ///
+    /// Returns an error if
+    ///
+    /// - the cache was not previously populated with
+    ///   `FontSourceClient.download_font()`
+    /// - the cached JSON file was modified by external actors in a
+    ///   way that causes deserialization errors.
+    #[pyo3(name = "family_cache_info")]
+    pub fn family_cache_info_py(&self, id: &str) -> PyResult<FamilyCacheInfo> {
+        self.family_cache_info(id).map_err(PyErr::from)
     }
 }
 
@@ -114,6 +132,10 @@ impl FontSourceClient {
 
     /// Asynchronously download a font file matching the given query.
     ///
+    /// The [`FontQuery::subset`] field may be overridden with
+    /// the family's default subset if the requested subset is
+    /// not available for the [`FontQuery::family`].
+    ///
     /// Returns the path to the downloaded font file.
     /// Returns a [`FontSourceError`] if the font could not be downloaded and/or the query is somehow invalid.
     ///
@@ -123,27 +145,30 @@ impl FontSourceClient {
     pub async fn download_font(&self, font: &FontQuery) -> Result<PathBuf> {
         let family = self.load_family_metadata(&font.family).await?;
 
+        let requested_subset = font.normalized_subset();
         let subset = if family
             .subsets
             .iter()
-            .any(|candidate| candidate == font.normalized_subset())
+            .any(|candidate| candidate == requested_subset)
         {
-            font.normalized_subset().to_string()
+            requested_subset.to_string()
         } else {
-            family.def_subset.clone()
+            family.default_subset.clone()
         };
         let weight = font.weight.into();
         if !family.weights.contains(&weight) {
-            return Err(FontSourceError::FontWeightNotAvailable {
+            return Err(FontSourceError::FontVariantNotAvailable {
                 family: family.family,
-                weight,
+                field: "weight",
+                requested_value: weight.to_string(),
             });
         }
         let style = font.normalized_style();
         if !family.styles.iter().any(|candidate| candidate == style) {
-            return Err(FontSourceError::FontStyleNotAvailable {
+            return Err(FontSourceError::FontVariantNotAvailable {
                 family: family.family,
-                style: style.to_string(),
+                field: "style",
+                requested_value: style.to_string(),
             });
         }
 
@@ -163,9 +188,10 @@ impl FontSourceClient {
 
         let font_url = family
             .variant_ttf_url(weight, style, &subset)
-            .ok_or_else(|| FontSourceError::FontSubsetNotAvailable {
+            .ok_or_else(|| FontSourceError::FontVariantNotAvailable {
                 family: family.family.clone(),
-                subset: subset.clone(),
+                field: "subset",
+                requested_value: subset.clone(),
             })?
             .to_string();
 
@@ -211,32 +237,28 @@ impl FontSourceClient {
         Ok(font_path)
     }
 
+    /// Load the metadata for a given font family and return it
     async fn load_family_metadata(&self, family: &str) -> Result<FontSourceFamily> {
-        let families = self.load_font_list_families(family).await?;
-        let requested = family.trim();
-        let matched = families
-            .iter()
-            .find(|(_id, name)| name.eq_ignore_ascii_case(requested))
-            .map(|(id, _)| id.to_string())
-            .ok_or_else(|| FontSourceError::FontFamilyNotFound {
-                family: family.to_string(),
-            })?;
+        let Some(fam_id) = self.load_font_list_families(family).await? else {
+            return Err(FontSourceError::FontFamilyNotFound {
+                family: family.trim().to_string(),
+            });
+        };
 
-        let family_cache_path = self.family_cache_dir(&matched).join(FAMILY_CACHE_FILE);
-        if let Some(cached) = fs::read_to_string(&family_cache_path)
+        if let Some(cached) = self
+            .family_cache_info(&fam_id)
             .ok()
-            .and_then(|raw| serde_json::from_str::<FamilyMetadataCacheFile>(&raw).ok())
-            .filter(|cached| cached.expires_at_unix > now_unix())
+            .filter(|cached| cached.expiration > now_unix())
         {
             return Ok(cached.family);
         }
 
         #[cfg(not(test))]
-        let family_url = format!("{FONTSOURCE_API}{FONTSOURCE_FONT_URL_PATH}{matched}");
+        let family_url = format!("{FONTSOURCE_API}{FONTSOURCE_FONT_URL_PATH}{fam_id}");
         #[cfg(test)]
         #[allow(clippy::unwrap_used, reason = "tests should panic on missing env var")]
         let family_url = format!(
-            "{}{FONTSOURCE_FONT_URL_PATH}{matched}",
+            "{}{FONTSOURCE_FONT_URL_PATH}{fam_id}",
             std::env::var("FONTSOURCE_API").unwrap()
         );
 
@@ -275,22 +297,24 @@ impl FontSourceClient {
             source: e,
         })?;
 
-        let cache_payload = FamilyMetadataCacheFile {
-            expires_at_unix: expires_at(ttl),
+        let cache_payload = FamilyCacheInfo {
+            expiration: expires_at(ttl),
             family: metadata,
         };
+        let family_cache_path = self.family_cache_dir(&fam_id).join(FAMILY_CACHE_FILE);
         self.write_cache_json_locked(&family_cache_path, &cache_payload)?;
 
         Ok(cache_payload.family)
     }
 
-    async fn load_font_list_families(&self, family: &str) -> Result<HashMap<String, String>> {
-        if let Some(cached) = fs::read_to_string(self.font_list_cache_path())
+    /// Load the list of font families and return the ID corresponding to the given family name.
+    async fn load_font_list_families(&self, family: &str) -> Result<Option<String>> {
+        if let Some(cached) = self
+            .font_list_cache_info()
             .ok()
-            .and_then(|raw| serde_json::from_str::<FontListCacheFile>(&raw).ok())
-            .filter(|cached| cached.expires_at_unix > now_unix())
+            .filter(|cached| cached.expiration > now_unix())
         {
-            return Ok(cached.families);
+            return Ok(cached.get_id_for_family(family).map(|v| v.to_string()));
         }
 
         #[cfg(not(test))]
@@ -334,19 +358,20 @@ impl FontSourceClient {
             source: e,
         })?;
 
-        let cache_file = FontListCacheFile {
-            expires_at_unix: expires_at(ttl),
+        let cache_file = FontListCacheInfo {
+            expiration: expires_at(ttl),
             families,
         };
         self.write_cache_json_locked(&self.font_list_cache_path(), &cache_file)?;
 
-        Ok(cache_file.families)
+        Ok(cache_file.get_id_for_family(family).map(|v| v.to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
     use super::*;
     use crate::query::Weight;
 
@@ -589,11 +614,16 @@ mod tests {
             weight: Weight::Bold, // only 400 in the asset
             ..Default::default()
         };
-        let err = client.download_font(&query).await.unwrap_err();
-        assert!(
-            matches!(err, FontSourceError::FontWeightNotAvailable { .. }),
-            "expected FontWeightNotAvailable, got {err:?}"
-        );
+        let Err(FontSourceError::FontVariantNotAvailable {
+            family: _,
+            field,
+            requested_value,
+        }) = client.download_font(&query).await
+        else {
+            panic!("expected FontVariantNotAvailable");
+        };
+        assert_eq!(field, "weight");
+        assert_eq!(requested_value.as_str(), "700");
     }
 
     /// `download_font` → requested style is not available.
@@ -608,11 +638,16 @@ mod tests {
             style: "italic".to_string(), // only "normal" in the asset
             ..Default::default()
         };
-        let err = client.download_font(&query).await.unwrap_err();
-        assert!(
-            matches!(err, FontSourceError::FontStyleNotAvailable { .. }),
-            "expected FontStyleNotAvailable, got {err:?}"
-        );
+        let Err(FontSourceError::FontVariantNotAvailable {
+            family: _,
+            field,
+            requested_value,
+        }) = client.download_font(&query).await
+        else {
+            panic!("expected FontVariantNotAvailable");
+        };
+        assert_eq!(field, "style");
+        assert_eq!(requested_value.as_str(), "italic");
     }
 
     /// `download_font` → font cache dir cannot be created (cache_dir is a file).
@@ -712,11 +747,16 @@ mod tests {
             subset: "cyrillic".to_string(),
             ..Default::default()
         };
-        let err = client.download_font(&query).await.unwrap_err();
-        assert!(
-            matches!(err, FontSourceError::FontSubsetNotAvailable { .. }),
-            "expected FontSubsetNotAvailable, got {err:?}"
-        );
+        let Err(FontSourceError::FontVariantNotAvailable {
+            family: _,
+            field,
+            requested_value,
+        }) = client.download_font(&query).await
+        else {
+            panic!("expected FontVariantNotAvailable");
+        };
+        assert_eq!(field, "subset");
+        assert_eq!(requested_value.as_str(), "cyrillic");
     }
 
     /// Second call to `download_font` for the same font returns the cached path
@@ -734,11 +774,17 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
+        let family = "Test Family".to_string();
         let query = FontQuery {
-            family: "Test Family".to_string(),
+            family: family.clone(),
+            subset: "french".to_string(), // should be overridden by default_subset "latin"
             ..Default::default()
         };
         let first = client.download_font(&query).await.unwrap();
+        let query = FontQuery {
+            family,
+            ..Default::default()
+        };
         // Second call should hit the fast path (file already exists).
         let second = client.download_font(&query).await.unwrap();
         assert_eq!(first, second);
