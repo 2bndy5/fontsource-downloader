@@ -1,3 +1,6 @@
+#[cfg(feature = "pyo3")]
+use pyo3::prelude::*;
+
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -19,15 +22,48 @@ const FONT_LIST_CACHE_FILE: &str = "fontsource-family-list-cache.json";
 pub(crate) const FAMILY_CACHE_FILE: &str = "family-metadata-cache.json";
 pub(crate) const CACHE_LOCK_EXT: &str = "lock";
 
+/// The cached list of font families.
+#[cfg_attr(
+    feature = "pyo3",
+    pyclass(module = "fontsource_downloader", get_all, frozen)
+)]
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FontListCacheFile {
-    pub expires_at_unix: u64,
+pub struct FontListCacheInfo {
+    /// The Unix timestamp (in seconds) when this cache entry expires.
+    #[serde(alias = "expires_at_unix")]
+    pub expiration: u64,
+    /// A mapping of family IDs to their display names.
     pub families: HashMap<String, String>,
 }
 
+#[cfg_attr(feature = "pyo3", pymethods)]
+impl FontListCacheInfo {
+    /// Get the family ID for a given family name.
+    ///
+    /// Traverses the mapping's values to find the first matching key,
+    /// where values are the `family` display name and keys are their corresponding ID.
+    pub fn get_id_for_family<'a>(&'a self, family: &str) -> Option<&'a str> {
+        let family = family.trim();
+        for (id, name) in &self.families {
+            if name == family {
+                return Some(id.as_str());
+            }
+        }
+        None
+    }
+}
+
+/// The cached metadata for a single font family.
+#[cfg_attr(
+    feature = "pyo3",
+    pyclass(module = "fontsource_downloader", get_all, frozen)
+)]
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FamilyMetadataCacheFile {
-    pub expires_at_unix: u64,
+pub struct FamilyCacheInfo {
+    /// The Unix timestamp (in seconds) when this cache entry expires.
+    #[serde(alias = "expires_at_unix")]
+    pub expiration: u64,
+    /// The metadata for the font family.
     pub family: FontSourceFamily,
 }
 
@@ -35,18 +71,58 @@ impl FontSourceClient {
     /// Get the path to the cache directory for font families.
     ///
     /// This directory shall contain all cached fonts for each family in subdirectories.
-    pub fn families_cache_path(&self) -> PathBuf {
+    pub(crate) fn families_cache_path(&self) -> PathBuf {
         self.cache_dir.join("families")
-    }
-
-    /// Get the path to the cache file for the list of font families.
-    pub fn font_list_cache_path(&self) -> PathBuf {
-        self.cache_dir.join(FONT_LIST_CACHE_FILE)
     }
 
     /// Get the path to the cache directory for a specific font family.
     pub(crate) fn family_cache_dir(&self, family_id: &str) -> PathBuf {
         self.families_cache_path().join(family_id)
+    }
+
+    /// Get the path to the cache file for the list of font families.
+    pub(crate) fn font_list_cache_path(&self) -> PathBuf {
+        self.cache_dir.join(FONT_LIST_CACHE_FILE)
+    }
+
+    /// Get the cached list of font families.
+    ///
+    /// Returns an error if
+    ///
+    /// - the cache was not previously populated with
+    ///   [`FontSourceClient::download_font()`]
+    /// - the cached JSON file was modified by external actors in a
+    ///   way that causes deserialization errors.
+    pub fn font_list_cache_info(&self) -> Result<FontListCacheInfo> {
+        let cache_path = self.font_list_cache_path();
+        let raw = fs::read_to_string(&cache_path).map_err(|source| {
+            FontSourceError::ReadCacheFileFailed {
+                path: cache_path,
+                source,
+            }
+        })?;
+        let cache = serde_json::from_str(&raw)?;
+        Ok(cache)
+    }
+
+    /// Get the cached metadata for a specific font family.
+    ///
+    /// Returns an error if
+    ///
+    /// - the cache was not previously populated with
+    ///   [`FontSourceClient::download_font()`]
+    /// - the cached JSON file was modified by external actors in a
+    ///   way that causes deserialization errors.
+    pub fn family_cache_info(&self, family_id: &str) -> Result<FamilyCacheInfo> {
+        let cache_path = self.family_cache_dir(family_id).join(FAMILY_CACHE_FILE);
+        let raw = fs::read_to_string(&cache_path).map_err(|source| {
+            FontSourceError::ReadCacheFileFailed {
+                path: cache_path,
+                source,
+            }
+        })?;
+        let cache = serde_json::from_str(&raw)?;
+        Ok(cache)
     }
 
     pub(crate) fn write_cache_json_locked<T: Serialize>(
@@ -218,16 +294,16 @@ mod tests {
 
         let mut families = HashMap::new();
         families.insert("roboto".to_string(), "Roboto".to_string());
-        let cache = FontListCacheFile {
-            expires_at_unix: 42,
+        let cache = FontListCacheInfo {
+            expiration: 42,
             families,
         };
 
         client.write_cache_json_locked(&target, &cache).unwrap();
 
         let raw = fs::read_to_string(&target).unwrap();
-        let parsed: FontListCacheFile = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed.expires_at_unix, 42);
+        let parsed: FontListCacheInfo = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.expiration, 42);
         assert_eq!(parsed.families.get("roboto").unwrap(), "Roboto");
         assert!(target.with_extension(CACHE_LOCK_EXT).exists());
     }

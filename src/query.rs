@@ -1,7 +1,7 @@
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 
-/// A struct describe the desired font to download.
+/// A struct describing the desired font to download.
 ///
 /// # Example
 /// ```
@@ -55,8 +55,11 @@ impl Default for FontQuery {
 
 impl FontQuery {
     pub(crate) fn normalized_style(&self) -> &'static str {
-        if self.style.trim().eq_ignore_ascii_case("italic") {
+        let style = self.style.trim();
+        if style.eq_ignore_ascii_case("italic") {
             return "italic";
+        } else if style.eq_ignore_ascii_case("oblique") {
+            return "oblique";
         }
         "normal"
     }
@@ -72,10 +75,12 @@ impl FontQuery {
 impl FontQuery {
     /// Create a new ``FontQuery`` with the given parameters.
     ///
+    /// Required parameter `family` is the display name of the font family to query.
+    ///
     /// Optional parameter defaults are as follows:
     ///
     /// - ``style``: "normal"
-    /// - ``weight``: 400
+    /// - ``weight``: `Weight.Normal` (or ``Weight(400)``)
     /// - ``subset``: "latin"
     #[new]
     #[pyo3(
@@ -214,5 +219,11 @@ mod tests {
             .normalized_subset(),
             "cyrillic"
         );
+
+        let query = FontQuery {
+            style: String::from("Oblique"),
+            ..Default::default()
+        };
+        assert_eq!(query.normalized_style(), "oblique");
     }
 }
