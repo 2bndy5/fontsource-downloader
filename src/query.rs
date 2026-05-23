@@ -4,41 +4,22 @@ use std::collections::{HashSet, hash_set::Iter};
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// A struct describing the desired font to download.
+/// A struct describing the desired font(s) to query.
 ///
-/// # Example
-/// ```
-/// use fontsource_downloader::FontQuery;
-/// let query = FontQuery {
-///     family: "Roboto".to_string(),
-///     ..Default::default()
-/// };
 #[cfg_attr(
     feature = "pyo3",
     pyclass(module = "fontsource_downloader", frozen, get_all, from_py_object)
 )]
+#[cfg_attr(
+    not(feature = "pyo3"),
+    doc = "Use [`QueryBuilder`] to construct a [`FontQuery`]."
+)]
 #[derive(Debug, Clone)]
 pub struct FontQuery {
-    /// The font family's name.
     family: String,
-
-    /// The font family's style.
-    ///
-    /// Fontsource typically only supports "normal" and "italic" styles,
-    /// but some families do not have italic styles.
     style: HashSet<String>,
-
-    /// The font's weight.
-    ///
-    /// Some families may not have all weights available.
     weight: HashSet<Weight>,
-
-    /// The font family's lingual subset.
-    ///
-    /// The valid options for this can vary depending on the font family.
     subset: HashSet<String>,
-
-    /// The preferred font file type to download.
     pub(crate) file_type: HashSet<FontFileType>,
 }
 
@@ -118,6 +99,8 @@ impl QueryBuilder {
     ///
     /// The style will be normalized to "normal", "italic", or "oblique"
     /// (case-insensitive, with leading/trailing whitespace stripped).
+    ///
+    /// If not specified, the default style is "normal".
     pub fn with_style(self, style: &str) -> Self {
         let mut styles = self.style;
         styles.insert(Self::normalized_style(style).to_string());
@@ -138,6 +121,9 @@ impl QueryBuilder {
     }
 
     /// Add a weight to this query.
+    ///
+    /// If not specified, the default weight is [`Weight::Normal`]
+    /// (or `Weight::from(400)`).
     pub fn with_weight(self, weight: Weight) -> Self {
         let mut weights = self.weight;
         weights.insert(weight);
@@ -149,8 +135,9 @@ impl QueryBuilder {
 
     /// Add a subset to this query.
     ///
-    /// The subset will be normalized by trimming leading/trailing whitespace.
-    /// If the resulting string is empty, it will default to "latin".
+    /// The subset will be normalized by trimming surrounding whitespace.
+    /// If the resulting string is empty (or never specified),
+    /// it will default to "latin".
     pub fn with_subset(self, subset: &str) -> Self {
         let mut subsets = self.subset;
         subsets.insert(Self::normalized_subset(subset).to_string());
@@ -166,6 +153,8 @@ impl QueryBuilder {
     }
 
     /// Add a file type to this query.
+    ///
+    /// If not specified, the default file type is [`FontFileType::Ttf`].
     pub fn with_file_type(self, file_type: FontFileType) -> Self {
         let mut file_types = self.file_type;
         file_types.insert(file_type);
@@ -262,45 +251,45 @@ impl FontQuery {
 #[cfg(feature = "pyo3")]
 #[pymethods]
 impl FontQuery {
-    /// Create a new ``FontQuery`` with the given parameters.
+    /// Create a new `FontQuery` with the given parameters.
     ///
     /// Required parameter `family` is the display name of the font family to query.
     ///
     /// Optional parameter defaults are as follows:
     ///
-    /// - ``style``: "normal"
-    /// - ``weight``: `Weight.Normal` (or ``Weight(400)``)
-    /// - ``subset``: "latin"
-    /// - ``file_type``: `FontFileType.Ttf`
+    /// - ``styles=["normal"]``
+    /// - ``weights=[Weight(400)]``
+    /// - ``subsets=["latin"]``
+    /// - ``file_types=[FontFileType.Ttf]``
     #[new]
     #[pyo3(
-        signature = (family, style=None, weight=None, subset=None, file_type=None),
-        text_signature = "(family: str, style: str | None = None, weight: list[Weight] | None = None, subset: list[str] | None = None, file_type: list[FontFileType] | None = None) -> FontQuery"
+        signature = (family, styles=None, weights=None, subsets=None, file_types=None),
+        text_signature = "(family: str, styles: str | None = None, weights: list[Weight] | None = None, subsets: list[str] | None = None, file_types: list[FontFileType] | None = None) -> FontQuery"
     )]
     pub fn new_py(
         family: String,
-        style: Option<Vec<String>>,
-        weight: Option<Vec<Weight>>,
-        subset: Option<Vec<String>>,
-        file_type: Option<Vec<FontFileType>>,
+        styles: Option<Vec<String>>,
+        weights: Option<Vec<Weight>>,
+        subsets: Option<Vec<String>>,
+        file_types: Option<Vec<FontFileType>>,
     ) -> Self {
         let mut result = QueryBuilder::new(&family);
-        if let Some(styles) = style {
+        if let Some(styles) = styles {
             for style in styles {
                 result = result.with_style(&style);
             }
         }
-        if let Some(weight) = weight {
+        if let Some(weight) = weights {
             for weight in weight {
                 result = result.with_weight(weight);
             }
         }
-        if let Some(subsets) = subset {
+        if let Some(subsets) = subsets {
             for subset in subsets {
                 result = result.with_subset(&subset);
             }
         }
-        if let Some(file_types) = file_type {
+        if let Some(file_types) = file_types {
             for file_type in file_types {
                 result = result.with_file_type(file_type);
             }

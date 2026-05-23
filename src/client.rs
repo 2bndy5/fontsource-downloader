@@ -156,14 +156,15 @@ impl FontSourceClient {
         })
     }
 
-    /// Asynchronously download a font file matching the given query.
+    /// Asynchronously download font file(s) matching the given query.
     ///
-    /// The [`FontQuery::subset`] field may be overridden with
-    /// the family's default subset if the requested subset is
+    /// The [`FontQuery::subsets`] value may be overridden with
+    /// the family's default subset if the requested subsets are
     /// not available for the [`FontQuery::family`].
     ///
-    /// Returns the path to the downloaded font file.
-    /// Returns a [`FontSourceError`] if the font could not be downloaded and/or the query is somehow invalid.
+    /// Returns the paths to the downloaded font files.
+    /// Returns a [`FontSourceError`] if the font could
+    /// not be downloaded and/or the query is somehow invalid.
     ///
     /// This method automatically uses cached metadata and font files when available.
     /// To configure the cache location, instantiate the client with
@@ -324,7 +325,7 @@ impl FontSourceClient {
         Ok(cache_payload.family)
     }
 
-    /// Load the list of font families and return the ID corresponding to the given family name.
+    /// Load the list of font families and return the ID corresponding to the given `family` name.
     async fn load_font_list_families(&self, family: &str) -> Result<Option<String>> {
         if let Some(cached) = self
             .font_list_cache_info()
@@ -384,25 +385,36 @@ impl FontSourceClient {
         Ok(cache_file.get_id_for_family(family).map(|v| v.to_string()))
     }
 
-    /// Generate CDN-based CSS for the requested font query by translating
-    /// the family's metadata into `@font-face` rules.
+    /// Generate CDN-based CSS for the given font `query`.
+    ///
+    /// This does not download any fonts, but the requested family's metadata
+    /// will be fetched if the cached metadata is expired or not present.
+    ///
+    /// Use [`FontSourceClient::css_self_hosted()`] if you intend to self-host fonts
+    /// from the site's static resources.
     pub async fn css(&self, query: &FontQuery) -> Result<String> {
         let family = self.load_family_metadata(query.family()).await?;
         family.to_css(query, None).await
     }
 
     /// Return the configured cache root directory for this client.
+    ///
+    /// Useful for clients that use the default platform-specific cache directory.
     pub fn cache_root(&self) -> PathBuf {
         self.cache_dir.clone()
     }
 
-    /// Generate self-hosted CSS for the given font `query` and copy font files into `dest` path.
+    /// Generate self-hosted CSS for the given font `query`
+    /// and copy font files into `dest` path.
     ///
-    /// This ensures any missing files required for the requested variant are downloaded
-    /// into the client's cache root and then emits `@font-face` rules where
-    /// URLs are formatted relative to `{cache_root}/families`. If `dest` is
-    /// provided the cached files for the family will be copied into
-    /// `dest/<family-id>` (only files already in cache are copied).
+    /// This ensures any missing files required for the requested variants are
+    /// downloaded into the client's cache directory. The cached font files are then
+    /// copied to given `dest` path.
+    ///
+    /// When done, the returned string is the CSS `@font-face` rules where
+    /// URLs are relative paths rooted in the given `dest` path. The copied font
+    /// files in `dest` are organized in subdirectories by family ID
+    /// (e.g. `dest/roboto/latin-400-normal.ttf`).
     pub async fn css_self_hosted(&self, query: &FontQuery, dest: &Path) -> Result<String> {
         let family = self.load_family_metadata(query.family()).await?;
         family.to_css(query, Some((self, dest))).await

@@ -153,10 +153,12 @@ impl FontSourceFamily {
 
     /// Synthesize `@font-face` CSS for the given `query` using the URLs
     /// available in this family's metadata.
-    pub async fn to_css(
+    ///
+    ///
+    pub(crate) async fn to_css(
         &self,
         query: &FontQuery,
-        client: Option<(&FontSourceClient, &Path)>,
+        client_dest: Option<(&FontSourceClient, &Path)>,
     ) -> Result<String> {
         let mut result = String::new();
         let var_subsets = self.get_variant_subsets(query)?;
@@ -168,7 +170,7 @@ impl FontSourceFamily {
                 .iter()
                 .filter(|(k, _)| query.file_type.contains(*k))
                 .collect();
-            let self_hosted = if let Some((client, dest)) = client {
+            let self_hosted = if let Some((client, dest)) = client_dest {
                 let family_cache_root = client.family_cache_dir(&self.id);
                 for (font_type, font_url) in &urls {
                     let file_name = format!("{subset}-{weight}-{style}.{}", font_type.extension());
