@@ -104,6 +104,32 @@ impl FontSourceClient {
     pub fn family_cache_info_py(&self, id: &str) -> PyResult<FamilyCacheInfo> {
         self.family_cache_info(id).map_err(PyErr::from)
     }
+
+    /// Generate CDN-based CSS for the requested `FontQuery` and return it as a string.
+    #[pyo3(name = "css")]
+    pub fn css_py<'py>(&self, py: Python<'py>, query: FontQuery) -> PyResult<Bound<'py, PyAny>> {
+        let this = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            this.css(&query).await.map_err(PyErr::from)
+        })
+    }
+
+    /// Generate self-hosted CSS (paths relative to the client's cache) for the requested `FontQuery`.
+    /// Missing files will be downloaded into the cache if necessary.
+    #[pyo3(name = "css_self_hosted")]
+    pub fn css_self_hosted_py<'py>(
+        &self,
+        py: Python<'py>,
+        query: FontQuery,
+        dest: PathBuf,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let this = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            this.css_self_hosted(&query, &dest)
+                .await
+                .map_err(PyErr::from)
+        })
+    }
 }
 
 impl FontSourceClient {
@@ -142,35 +168,9 @@ impl FontSourceClient {
     /// This method automatically uses cached metadata and font files when available.
     /// To configure the cache location, instantiate the client with
     /// [`FontSourceClient::with_cache_root()`] constructor.
-    pub async fn download_font(&self, font: &FontQuery) -> Result<PathBuf> {
-        let family = self.load_family_metadata(&font.family).await?;
-
-        let requested_subset = font.normalized_subset();
-        let subset = if family
-            .subsets
-            .iter()
-            .any(|candidate| candidate == requested_subset)
-        {
-            requested_subset.to_string()
-        } else {
-            family.default_subset.clone()
-        };
-        let weight = font.weight.into();
-        if !family.weights.contains(&weight) {
-            return Err(FontSourceError::FontVariantNotAvailable {
-                family: family.family,
-                field: "weight",
-                requested_value: weight.to_string(),
-            });
-        }
-        let style = font.normalized_style();
-        if !family.styles.iter().any(|candidate| candidate == style) {
-            return Err(FontSourceError::FontVariantNotAvailable {
-                family: family.family,
-                field: "style",
-                requested_value: style.to_string(),
-            });
-        }
+    pub async fn download_font(&self, query: &FontQuery) -> Result<Vec<PathBuf>> {
+        let family = self.load_family_metadata(query.family()).await?;
+        let subsets = family.get_variant_subsets(query)?;
 
         let family_cache_dir = self.family_cache_dir(&family.id);
         fs::create_dir_all(&family_cache_dir).map_err(|source| {
@@ -179,21 +179,38 @@ impl FontSourceClient {
                 source,
             }
         })?;
-        let font_path = family_cache_dir.join(format!("{subset}-{weight}-{style}.ttf"));
+        let mut result = vec![];
+        // let extensions = query.file_types().map(|v| v.extension()).collect::<Vec<&str>>();
+        for ((weight, style, subset), urls) in &subsets {
+            for (file_type, font_url) in &urls.url {
+                if !query.file_type.contains(file_type) {
+                    continue;
+                }
+                let file_name = format!("{subset}-{weight}-{style}.{}", file_type.extension());
+                let font_path = family_cache_dir.join(&file_name);
+                self.download_font_file(&font_path, font_url).await?;
+                result.push(font_path);
+            }
+        }
+        if result.is_empty() {
+            return Err(FontSourceError::FontVariantNotAvailable {
+                family: query.family().to_string(),
+                field: "file_type",
+                requested_value: query
+                    .file_types()
+                    .map(|t| t.extension())
+                    .collect::<Vec<&str>>()
+                    .join(","),
+            });
+        }
+        Ok(result)
+    }
 
+    pub(crate) async fn download_font_file(&self, font_path: &Path, font_url: &str) -> Result<()> {
         // Cheap pre-lock fast path: if the file already exists, skip locking entirely.
         if font_path.exists() {
-            return Ok(font_path);
+            return Ok(());
         }
-
-        let font_url = family
-            .variant_ttf_url(weight, style, &subset)
-            .ok_or_else(|| FontSourceError::FontVariantNotAvailable {
-                family: family.family.clone(),
-                field: "subset",
-                requested_value: subset.clone(),
-            })?
-            .to_string();
 
         // Acquire a lock before writing the font file so concurrent processes
         // don't race to download and overwrite the same file.
@@ -205,25 +222,25 @@ impl FontSourceClient {
         if !font_path.exists() {
             let bytes = self
                 .client
-                .get(&font_url)
+                .get(font_url)
                 .send()
                 .await
                 .map_err(|source| FontSourceError::FontDownloadFailed {
-                    url: font_url.clone(),
+                    url: font_url.to_string(),
                     source,
                 })?
                 .error_for_status()
                 .map_err(|source| FontSourceError::FontDownloadFailed {
-                    url: font_url.clone(),
+                    url: font_url.to_string(),
                     source,
                 })?
                 .bytes()
                 .await
                 .map_err(|source| FontSourceError::FontDownloadFailed {
-                    url: font_url.clone(),
+                    url: font_url.to_string(),
                     source,
                 })?;
-            fs::write(&font_path, &bytes).map_err(|source| FontSourceError::WriteFileFailed {
+            fs::write(font_path, &bytes).map_err(|source| FontSourceError::WriteFileFailed {
                 path: font_path.display().to_string(),
                 source,
             })?;
@@ -234,7 +251,7 @@ impl FontSourceClient {
                 path: lock_path,
                 source,
             })?;
-        Ok(font_path)
+        Ok(())
     }
 
     /// Load the metadata for a given font family and return it
@@ -366,6 +383,30 @@ impl FontSourceClient {
 
         Ok(cache_file.get_id_for_family(family).map(|v| v.to_string()))
     }
+
+    /// Generate CDN-based CSS for the requested font query by translating
+    /// the family's metadata into `@font-face` rules.
+    pub async fn css(&self, query: &FontQuery) -> Result<String> {
+        let family = self.load_family_metadata(query.family()).await?;
+        family.to_css(query, None).await
+    }
+
+    /// Return the configured cache root directory for this client.
+    pub fn cache_root(&self) -> PathBuf {
+        self.cache_dir.clone()
+    }
+
+    /// Generate self-hosted CSS for the given font `query` and copy font files into `dest` path.
+    ///
+    /// This ensures any missing files required for the requested variant are downloaded
+    /// into the client's cache root and then emits `@font-face` rules where
+    /// URLs are formatted relative to `{cache_root}/families`. If `dest` is
+    /// provided the cached files for the family will be copied into
+    /// `dest/<family-id>` (only files already in cache are copied).
+    pub async fn css_self_hosted(&self, query: &FontQuery, dest: &Path) -> Result<String> {
+        let family = self.load_family_metadata(query.family()).await?;
+        family.to_css(query, Some((self, dest))).await
+    }
 }
 
 #[cfg(test)]
@@ -373,7 +414,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
     use super::*;
-    use crate::query::Weight;
+    use crate::query::{FontFileType, QueryBuilder, Weight};
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -417,10 +458,7 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family").build();
         let err = client.download_font(&query).await.unwrap_err();
         assert!(
             matches!(err, FontSourceError::MetadataRequestFailed { .. }),
@@ -441,10 +479,7 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family").build();
         let err = client.download_font(&query).await.unwrap_err();
         assert!(
             matches!(
@@ -469,29 +504,18 @@ mod tests {
             .with_body(font_list_json())
             .create_async()
             .await;
-        // Point cache_dir at a *file* so that creating subdirectories/files fails.
         let tmp = tempfile::tempdir().unwrap();
-        let blocker = tmp.path().join("blocker");
-        std::fs::write(&blocker, b"").unwrap();
         unsafe {
             std::env::set_var("FONTSOURCE_API", server.url() + "/");
         }
-        // cache_dir IS the blocker file – every fs operation against it fails
-        let client = FontSourceClient::with_cache_root(&blocker).unwrap();
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            ..Default::default()
-        };
+        let client = FontSourceClient::with_cache_root(tmp.path()).unwrap();
+        // Force write failure for font-list cache by making the target path a directory.
+        std::fs::create_dir_all(client.font_list_cache_path()).unwrap();
+        let query = QueryBuilder::new("Test Family").build();
         let err = client.download_font(&query).await.unwrap_err();
-        // The exact variant depends on which write first fails:
-        // either CreateFontCacheDirFailed or WriteFileFailed.
         assert!(
-            matches!(
-                err,
-                FontSourceError::CreateFontCacheDirFailed { .. }
-                    | FontSourceError::WriteFileFailed { .. }
-            ),
-            "expected cache-write error, got {err:?}"
+            matches!(err, FontSourceError::WriteFileFailed { .. }),
+            "expected WriteFileFailed, got {err:?}"
         );
     }
 
@@ -509,10 +533,7 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Nonexistent Font".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Nonexistent Font").build();
         let err = client.download_font(&query).await.unwrap_err();
         assert!(
             matches!(err, FontSourceError::FontFamilyNotFound { .. }),
@@ -539,10 +560,7 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family").build();
         let err = client.download_font(&query).await.unwrap_err();
         assert!(
             matches!(err, FontSourceError::MetadataRequestFailed { .. }),
@@ -568,10 +586,7 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family").build();
         let err = client.download_font(&query).await.unwrap_err();
         assert!(
             matches!(
@@ -609,11 +624,9 @@ mod tests {
         setup_mocks_for_download(&mut server, "http://example.com/dummy.ttf").await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            weight: Weight::Bold, // only 400 in the asset
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family")
+            .with_weight(Weight::Bold) // only 400 in the asset
+            .build();
         let Err(FontSourceError::FontVariantNotAvailable {
             family: _,
             field,
@@ -633,11 +646,9 @@ mod tests {
         setup_mocks_for_download(&mut server, "http://example.com/dummy.ttf").await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            style: "italic".to_string(), // only "normal" in the asset
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family")
+            .with_style("italic") // only "normal" in the asset
+            .build();
         let Err(FontSourceError::FontVariantNotAvailable {
             family: _,
             field,
@@ -650,32 +661,80 @@ mod tests {
         assert_eq!(requested_value.as_str(), "italic");
     }
 
+    /// `download_font` -> requesting only unavailable file formats returns an error.
+    #[tokio::test]
+    async fn format_not_available() {
+        let mut server = mockito::Server::new_async().await;
+        // Fixture metadata currently only provides `ttf` URLs.
+        setup_mocks_for_download(&mut server, "http://example.com/dummy.ttf").await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = client_for(&server, &tmp);
+        let query = QueryBuilder::new("Test Family")
+            .with_file_type(FontFileType::Woff)
+            .build();
+        let Err(FontSourceError::FontVariantNotAvailable {
+            family,
+            field,
+            requested_value,
+        }) = client.download_font(&query).await
+        else {
+            panic!("expected FontVariantNotAvailable");
+        };
+        assert_eq!(family, "Test Family");
+        assert_eq!(field, "file_type");
+        assert_eq!(requested_value.as_str(), "woff");
+    }
+
     /// `download_font` → font cache dir cannot be created (cache_dir is a file).
     #[tokio::test]
     async fn create_cache_dir_failed() {
         let mut server = mockito::Server::new_async().await;
         let ttf_url = format!("{}/dummy.ttf", server.url());
-        setup_mocks_for_download(&mut server, &ttf_url).await;
+        // Keep font-list ID different from metadata ID so metadata caching succeeds
+        // at one path while download_font() tries creating another blocked path.
+        let _font_list = server
+            .mock("GET", mockito::Matcher::Regex(r"fontlist".to_string()))
+            .with_status(200)
+            .with_body(r#"{"cache-safe-id":"Test Family"}"#)
+            .create_async()
+            .await;
+        let metadata = format!(
+            r#"{{
+                "id": "blocked-id",
+                "family": "Test Family",
+                "subsets": ["latin"],
+                "weights": [400],
+                "styles": ["normal"],
+                "defSubset": "latin",
+                "variants": {{
+                    "400": {{
+                        "normal": {{
+                            "latin": {{ "url": {{ "ttf": "{ttf_url}" }} }}
+                        }}
+                    }}
+                }}
+            }}"#
+        );
+        let _metadata = server
+            .mock("GET", mockito::Matcher::Regex(r"v1/fonts".to_string()))
+            .with_status(200)
+            .with_body(metadata)
+            .create_async()
+            .await;
         let tmp = tempfile::tempdir().unwrap();
-        // Create a *file* at the spot where the families dir would be created.
-        let families_path = tmp.path().join("families");
-        std::fs::write(&families_path, b"").unwrap();
+        let families_root = tmp.path().join("families");
+        std::fs::create_dir_all(&families_root).unwrap();
+        // Block the exact directory download_font() will try to create.
+        std::fs::write(families_root.join("blocked-id"), b"").unwrap();
         unsafe {
             std::env::set_var("FONTSOURCE_API", server.url() + "/");
         }
         let client = FontSourceClient::with_cache_root(tmp.path()).unwrap();
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family").build();
         let err = client.download_font(&query).await.unwrap_err();
         assert!(
-            matches!(
-                err,
-                FontSourceError::CreateFontCacheDirFailed { .. }
-                    | FontSourceError::WriteFileFailed { .. }
-            ),
-            "expected cache-dir error, got {err:?}"
+            matches!(err, FontSourceError::CreateFontCacheDirFailed { .. }),
+            "expected CreateFontCacheDirFailed, got {err:?}"
         );
     }
 
@@ -693,10 +752,7 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family").build();
         let err = client.download_font(&query).await.unwrap_err();
         assert!(
             matches!(err, FontSourceError::FontDownloadFailed { .. }),
@@ -742,11 +798,9 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            subset: "cyrillic".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family")
+            .with_subset("cyrillic")
+            .build();
         let Err(FontSourceError::FontVariantNotAvailable {
             family: _,
             field,
@@ -774,17 +828,11 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let family = "Test Family".to_string();
-        let query = FontQuery {
-            family: family.clone(),
-            subset: "french".to_string(), // should be overridden by default_subset "latin"
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family")
+            .with_subset("french") // should be overridden by default_subset "latin"
+            .build();
         let first = client.download_font(&query).await.unwrap();
-        let query = FontQuery {
-            family,
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family").build();
         // Second call should hit the fast path (file already exists).
         let second = client.download_font(&query).await.unwrap();
         assert_eq!(first, second);
@@ -819,10 +867,7 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
-        let query = FontQuery {
-            family: "Test Family".to_string(),
-            ..Default::default()
-        };
+        let query = QueryBuilder::new("Test Family").build();
         client.download_font(&query).await.unwrap();
         // Second call uses cache – mocks would panic if hit again.
         client.download_font(&query).await.unwrap();

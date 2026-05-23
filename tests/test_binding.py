@@ -7,11 +7,13 @@ from fontsource_downloader import FontQuery, FontSourceClient, Weight
 @pytest.mark.asyncio
 async def test_download_font(tmp_path: Path):
     client = FontSourceClient(cache_root=str(tmp_path))
-    font = FontQuery(family="Roboto", weight=Weight(400))
-    path = await client.download_font(font)
-    assert path.is_file()
-    assert path.suffix == ".ttf"
-    assert path.exists()
+    font = FontQuery(family="Roboto", weights=[Weight(400)])
+    paths = await client.download_font(font)
+    assert paths
+    for path in paths:
+        assert path.is_file()
+        assert path.suffix == ".ttf"
+        assert path.exists()
 
     cached_list = client.font_list_cache_info()
     assert cached_list.families
@@ -20,7 +22,6 @@ async def test_download_font(tmp_path: Path):
     assert family_id is not None
     cached_info = client.family_cache_info(family_id)
     assert cached_info.family.family == "Roboto"
-    assert cached_info.family.variant_ttf_url(400, "normal", "latin") is not None
     assert cached_info.family.weights
     assert cached_info.family.styles
     assert cached_info.family.subsets

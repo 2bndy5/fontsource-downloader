@@ -1,9 +1,15 @@
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    FontSourceClient,
+    error::{FontSourceError, Result},
+    query::{FontFileType, FontQuery},
+};
 
 /// The metadata for a single font family.
 #[cfg_attr(
@@ -62,22 +68,142 @@ pub struct FontSourceFamily {
     #[serde(rename = "defSubset")]
     pub default_subset: String,
 
+    /// Unicode ranges for each supported subset.
+    #[serde(default, rename = "unicodeRange")]
+    pub(crate) unicode_range: HashMap<String, String>,
+
+    /// Whether this font family supports variable fonts.
+    #[serde(default)]
+    pub(crate) variable: bool,
+
     /// The mapping of font variants (weight, style, subset) to their corresponding URLs.
     #[serde(default)]
     pub(crate) variants: FontSourceVariants,
 }
 
-#[cfg_attr(feature = "pyo3", pymethods)]
 impl FontSourceFamily {
-    /// Retrieves the TTF URL for a specific font variant based on weight, style, and subset.
-    ///
-    /// Return `None` if the specified variant does not exist.
-    pub fn variant_ttf_url(&self, weight: u16, style: &str, subset: &str) -> Option<&str> {
-        self.variants
-            .weight(weight)
-            .and_then(|styles| styles.style(style))
-            .and_then(|subsets| subsets.subset(subset))
-            .map(|variant| variant.url.ttf.as_str())
+    /// Returns a map of (weight, style, subset) to `FontSourceVariantSubset` for the variants matching the query.
+    pub(crate) fn get_variant_subsets<'a>(
+        &'a self,
+        query: &'a FontQuery,
+    ) -> Result<HashMap<(u16, &'a str, &'a str), &'a FontSourceVariantSubset>> {
+        let mut result = HashMap::default();
+
+        let mut subsets = query.filter_subsets(&self.subsets);
+        if subsets.is_empty() {
+            subsets.push(&self.default_subset);
+        }
+
+        let weights = query.filter_weights(&self.weights);
+        if weights.is_empty() {
+            return Err(FontSourceError::FontVariantNotAvailable {
+                family: query.family().to_string(),
+                field: "weight",
+                requested_value: query
+                    .weights()
+                    .map(|v| u16::from(v).to_string())
+                    .collect::<Vec<String>>()
+                    .join(", "),
+            });
+        }
+        let styles = query.filter_styles(&self.styles);
+        if styles.is_empty() {
+            return Err(FontSourceError::FontVariantNotAvailable {
+                family: query.family().to_string(),
+                field: "style",
+                requested_value: query
+                    .styles()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", "),
+            });
+        }
+        for weight in weights {
+            let var_weight =
+                self.variants
+                    .weight(weight)
+                    .ok_or(FontSourceError::FontVariantNotAvailable {
+                        family: query.family().to_string(),
+                        field: "weight",
+                        requested_value: weight.to_string(),
+                    })?;
+            for style in &styles {
+                let var_style =
+                    var_weight
+                        .style(style)
+                        .ok_or(FontSourceError::FontVariantNotAvailable {
+                            family: query.family().to_string(),
+                            field: "style",
+                            requested_value: style.to_string(),
+                        })?;
+                for subset in &subsets {
+                    let var_subset = var_style.subset(subset).ok_or(
+                        FontSourceError::FontVariantNotAvailable {
+                            family: self.family.clone(),
+                            field: "subset",
+                            requested_value: subset.to_string(),
+                        },
+                    )?;
+                    result.insert((weight, style.as_str(), subset.as_str()), var_subset);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Synthesize `@font-face` CSS for the given `query` using the URLs
+    /// available in this family's metadata.
+    pub async fn to_css(
+        &self,
+        query: &FontQuery,
+        client: Option<(&FontSourceClient, &Path)>,
+    ) -> Result<String> {
+        let mut result = String::new();
+        let var_subsets = self.get_variant_subsets(query)?;
+
+        // Build a map of available formats -> URL and delegate formatting.
+        for ((weight, style, subset), urls) in &var_subsets {
+            let urls: HashMap<&FontFileType, &String> = urls
+                .url
+                .iter()
+                .filter(|(k, _)| query.file_type.contains(*k))
+                .collect();
+            let self_hosted = if let Some((client, dest)) = client {
+                let family_cache_root = client.family_cache_dir(&self.id);
+                for (font_type, font_url) in &urls {
+                    let file_name = format!("{subset}-{weight}-{style}.{}", font_type.extension());
+                    let font_path = family_cache_root.join(&file_name);
+                    client.download_font_file(&font_path, font_url).await?;
+                    fs::copy(&font_path, dest).map_err(|source| {
+                        FontSourceError::WriteFileFailed {
+                            path: dest.to_string_lossy().to_string(),
+                            source,
+                        }
+                    })?;
+                }
+                Some((*weight, *style, *subset))
+            } else {
+                None
+            };
+            let css_urls =
+                css_url_map(&urls, self_hosted.map(|v| (Path::new(&self.id), v))).join(",\n    ");
+            let mut css = format!(
+                r#"
+@font-face {{
+  font-family: '{}';
+  font-style: {style};
+  font-weight: {weight};
+  src:
+    {css_urls};"#,
+                self.family,
+            );
+            if let Some(range) = self.unicode_range.get(*subset) {
+                css.push_str(&format!("\n  unicode-range: {range};"));
+            }
+            css.push_str("\n}\n");
+            result.push_str(&css);
+        }
+        Ok(result)
     }
 }
 
@@ -116,13 +242,162 @@ impl FontSourceSubsets {
 
 /// A specific font variant's download URLs.
 ///
-/// Only contains the TTF URL.
+/// A variant may not include all file formats.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FontSourceVariantSubset {
-    url: FontSourceVariantUrls,
+    pub url: HashMap<FontFileType, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FontSourceVariantUrls {
-    ttf: String,
+/// Returns a list of CSS `src` entries for this variant subset.
+///
+/// The optional `self_hosted` tuple shall include:
+/// - index 0: The relative path prefix used to construct a self-hosted URL (e.g., "fonts/roboto").
+/// - index 1: The weight, style, and subset to construct the file name (e.g., "latin-400-normal.woff2").
+///
+/// If `self_hosted` is not provided, the original URLs from the metadata (pointing to fontsource's CDN)
+/// will be used instead.
+pub fn css_url_map(
+    map: &HashMap<&FontFileType, &String>,
+    self_hosted: Option<(&Path, (u16, &str, &str))>,
+) -> Vec<String> {
+    let mut src_parts = Vec::new();
+    if let Some(u) = map.get(&FontFileType::Woff2)
+        && !u.is_empty()
+    {
+        match &self_hosted {
+            Some((path_prefix, (weight, style, subset))) => {
+                let file_name = format!(
+                    "{subset}-{weight}-{style}.{}",
+                    FontFileType::Woff2.extension()
+                );
+                let full_path = path_prefix.join(&file_name);
+                src_parts.push(format!(
+                    r#"url("{}") format("woff2")"#,
+                    full_path.to_string_lossy().replace("\\", "/")
+                ));
+            }
+            None => src_parts.push(format!(r#"url("{u}") format("woff2")"#)),
+        }
+    }
+    if let Some(u) = map.get(&FontFileType::Woff)
+        && !u.is_empty()
+    {
+        match &self_hosted {
+            Some((path_prefix, (weight, style, subset))) => {
+                let file_name = format!(
+                    "{subset}-{weight}-{style}.{}",
+                    FontFileType::Woff.extension()
+                );
+                let full_path = path_prefix.join(&file_name);
+                src_parts.push(format!(
+                    r#"url("{}") format("woff")"#,
+                    full_path.to_string_lossy().replace("\\", "/")
+                ));
+            }
+            None => src_parts.push(format!(r#"url("{u}") format("woff")"#)),
+        }
+    }
+    if let Some(u) = map.get(&FontFileType::Ttf)
+        && !u.is_empty()
+    {
+        match &self_hosted {
+            Some((path_prefix, (weight, style, subset))) => {
+                let file_name = format!(
+                    "{subset}-{weight}-{style}.{}",
+                    FontFileType::Ttf.extension()
+                );
+                let full_path = path_prefix.join(&file_name);
+                src_parts.push(format!(
+                    r#"url("{}") format("truetype")"#,
+                    full_path.to_string_lossy().replace("\\", "/")
+                ));
+            }
+            None => src_parts.push(format!(r#"url("{u}") format("truetype")"#)),
+        }
+    }
+    src_parts
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::{FontSourceClient, QueryBuilder};
+    use std::{collections::HashMap, fs, path::Path};
+
+    fn test_family(ttf_url: &str) -> FontSourceFamily {
+        let mut url_map = HashMap::new();
+        url_map.insert(FontFileType::Ttf, ttf_url.to_string());
+
+        let mut subset_map = HashMap::new();
+        subset_map.insert(
+            "latin".to_string(),
+            FontSourceVariantSubset { url: url_map },
+        );
+
+        let mut style_map = HashMap::new();
+        style_map.insert("normal".to_string(), FontSourceSubsets(subset_map));
+
+        let mut variant_map = HashMap::new();
+        variant_map.insert(400_u16, FontSourceStyles(style_map));
+
+        FontSourceFamily {
+            id: "roboto".to_string(),
+            family: "Roboto".to_string(),
+            subsets: vec!["latin".to_string()],
+            weights: vec![400],
+            styles: vec!["normal".to_string()],
+            default_subset: "latin".to_string(),
+            unicode_range: HashMap::new(),
+            variable: false,
+            variants: FontSourceVariants(variant_map),
+        }
+    }
+
+    #[test]
+    fn css_url_maps_to_empty_list() {
+        let empty: HashMap<&FontFileType, &String> = HashMap::new();
+
+        assert!(css_url_map(&empty, None).is_empty());
+        assert!(
+            css_url_map(
+                &empty,
+                Some((Path::new("roboto"), (400, "normal", "latin")))
+            )
+            .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn self_hosted_css_copy_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let ttf_path = "/dummy.ttf";
+        let ttf_url = format!("{}{}", server.url(), ttf_path);
+        let _ttf_mock = server
+            .mock("GET", ttf_path)
+            .with_status(200)
+            .with_body("dummy-font-data")
+            .create_async()
+            .await;
+
+        let cache_root = tempfile::tempdir().unwrap();
+        let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
+        fs::create_dir_all(client.family_cache_dir("roboto")).unwrap();
+
+        // Passing a directory as destination makes fs::copy fail and should map
+        // to FontSourceError::WriteFileFailed in FontSourceFamily::to_css.
+        let dest_dir = tempfile::tempdir().unwrap();
+        let family = test_family(&ttf_url);
+        let query = QueryBuilder::new("Roboto").build();
+        let err = family
+            .to_css(&query, Some((&client, dest_dir.path())))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, FontSourceError::WriteFileFailed { .. }),
+            "expected WriteFileFailed, got {err:?}"
+        );
+    }
 }
