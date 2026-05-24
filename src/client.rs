@@ -2,6 +2,7 @@
 use pyo3::prelude::*;
 
 use reqwest::{Client, ClientBuilder};
+use tokio::task::JoinSet;
 
 use std::{
     collections::HashMap,
@@ -181,8 +182,7 @@ impl FontSourceClient {
                 source,
             }
         })?;
-        let mut result = vec![];
-        // let extensions = query.file_types().map(|v| v.extension()).collect::<Vec<&str>>();
+        let mut download_tasks = JoinSet::new();
         for ((weight, style, subset), urls) in &subsets {
             for (file_type, font_url) in &urls.url {
                 if !query.file_type.contains(file_type) {
@@ -190,11 +190,15 @@ impl FontSourceClient {
                 }
                 let file_name = format!("{subset}-{weight}-{style}.{}", file_type.extension());
                 let font_path = family_cache_dir.join(&file_name);
-                self.download_font_file(&font_path, font_url).await?;
-                result.push(font_path);
+                let client = self.clone();
+                let font_url = font_url.to_string();
+                download_tasks.spawn(async move {
+                    client.download_font_file(&font_path, &font_url).await?;
+                    Ok(font_path)
+                });
             }
         }
-        if result.is_empty() {
+        if download_tasks.is_empty() {
             return Err(FontSourceError::FontVariantNotAvailable {
                 family: query.family().to_string(),
                 field: "file_type",
@@ -204,6 +208,20 @@ impl FontSourceClient {
                     .collect::<Vec<&str>>()
                     .join(","),
             });
+        }
+        Self::collect_concurrent_tasks(&mut download_tasks, "downloading requested font files")
+            .await
+    }
+
+    pub(crate) async fn collect_concurrent_tasks<T: 'static>(
+        tasks: &mut JoinSet<Result<T>>,
+        task: &'static str,
+    ) -> Result<Vec<T>> {
+        let mut result = vec![];
+        while let Some(joined) = tasks.join_next().await {
+            let item = joined
+                .map_err(|source| FontSourceError::ConcurrentTaskFailed { task, source })??;
+            result.push(item);
         }
         Ok(result)
     }
@@ -891,5 +909,25 @@ mod tests {
         client.download_font(&query).await.unwrap();
         // Second call uses cache – mocks would panic if hit again.
         client.download_font(&query).await.unwrap();
+    }
+
+    /// `collect_concurrent_tasks` maps a Tokio join failure into `ConcurrentTaskFailed`.
+    #[tokio::test]
+    async fn concurrent_task_failed_error() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async {
+            panic!("simulated task panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        });
+
+        let err = FontSourceClient::collect_concurrent_tasks(&mut tasks, "test join set")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, FontSourceError::ConcurrentTaskFailed { .. }),
+            "expected ConcurrentTaskFailed, got {err:?}"
+        );
     }
 }

@@ -73,6 +73,16 @@ pub enum FontSourceError {
         source: reqwest::Error,
     },
 
+    /// Error when a spawned concurrent task fails to complete.
+    #[error("Failed while running concurrent task for {task}")]
+    ConcurrentTaskFailed {
+        /// A description of the concurrent operation.
+        task: &'static str,
+        /// The underlying task join failure from Tokio.
+        #[source]
+        source: tokio::task::JoinError,
+    },
+
     /// Error when writing files (in cache directory)
     #[error("Failed to write file '{path}'")]
     WriteFileFailed {
@@ -149,6 +159,9 @@ impl From<FontSourceError> for pyo3::PyErr {
                 PyOSError::new_err(format!("{value:?}"))
             }
             FontSourceError::FontDownloadFailed { url: _, source: _ } => {
+                PyRuntimeError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::ConcurrentTaskFailed { task: _, source: _ } => {
                 PyRuntimeError::new_err(format!("{value:?}"))
             }
             FontSourceError::WriteFileFailed { path: _, source: _ } => {

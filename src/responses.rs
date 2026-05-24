@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use std::{collections::HashMap, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinSet;
 
 use crate::{
     FontSourceClient,
@@ -168,6 +169,7 @@ impl FontSourceFamily {
         client_dest: Option<(&FontSourceClient, &Path, Option<&Path>)>,
     ) -> Result<String> {
         let mut result = String::new();
+        let mut download_tasks = JoinSet::new();
         let var_subsets = self.get_variant_subsets(query)?;
         let client_dest = client_dest.map(|(c, p, d)| (c, p.join(&self.id), d));
 
@@ -185,13 +187,19 @@ impl FontSourceFamily {
                         let file_name =
                             format!("{subset}-{weight}-{style}.{}", font_type.extension());
                         let font_path = family_cache_root.join(&file_name);
-                        client.download_font_file(&font_path, font_url).await?;
-                        fs::copy(&font_path, dest).map_err(|source| {
-                            FontSourceError::WriteFileFailed {
-                                path: dest.to_string_lossy().to_string(),
-                                source,
-                            }
-                        })?;
+                        let dest = dest.to_path_buf();
+                        let client = (*client).to_owned();
+                        let font_url = (*font_url).clone();
+                        download_tasks.spawn(async move {
+                            client.download_font_file(&font_path, &font_url).await?;
+                            fs::copy(&font_path, &dest).map_err(|source| {
+                                FontSourceError::WriteFileFailed {
+                                    path: dest.to_string_lossy().to_string(),
+                                    source,
+                                }
+                            })?;
+                            Ok(())
+                        });
                     }
                 }
                 Some(((*weight, *style, *subset), rel_prefix.as_path()))
@@ -215,6 +223,13 @@ impl FontSourceFamily {
             css.push_str("\n}\n");
             result.push_str(&css);
         }
+
+        FontSourceClient::collect_concurrent_tasks(
+            &mut download_tasks,
+            "downloading and copying self-hosted font files",
+        )
+        .await?;
+
         Ok(result)
     }
 }
