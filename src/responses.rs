@@ -154,14 +154,22 @@ impl FontSourceFamily {
     /// Synthesize `@font-face` CSS for the given `query` using the URLs
     /// available in this family's metadata.
     ///
+    /// The optional `client_dest` tuple shall include:
+    /// - index 0: The `FontSourceClient` to use for downloading font files
+    /// - index 1: A relative path prefix. The family ID is always appended to this prefix
+    ///   when building URL paths (e.g., `""` -> `"roboto/font-file"`, `".."` -> `"../roboto/font-file"`).
+    /// - index 2: An optional path to copy downloaded font files to.
+    ///   If omitted, files are not copied.
     ///
+    /// If `client_dest` is not provided, metadata URLs (CDN) are used directly.
     pub(crate) async fn to_css(
         &self,
         query: &FontQuery,
-        client_dest: Option<(&FontSourceClient, &Path)>,
+        client_dest: Option<(&FontSourceClient, &Path, Option<&Path>)>,
     ) -> Result<String> {
         let mut result = String::new();
         let var_subsets = self.get_variant_subsets(query)?;
+        let client_dest = client_dest.map(|(c, p, d)| (c, p.join(&self.id), d));
 
         // Build a map of available formats -> URL and delegate formatting.
         for ((weight, style, subset), urls) in &var_subsets {
@@ -170,25 +178,27 @@ impl FontSourceFamily {
                 .iter()
                 .filter(|(k, _)| query.file_type.contains(*k))
                 .collect();
-            let self_hosted = if let Some((client, dest)) = client_dest {
-                let family_cache_root = client.family_cache_dir(&self.id);
-                for (font_type, font_url) in &urls {
-                    let file_name = format!("{subset}-{weight}-{style}.{}", font_type.extension());
-                    let font_path = family_cache_root.join(&file_name);
-                    client.download_font_file(&font_path, font_url).await?;
-                    fs::copy(&font_path, dest).map_err(|source| {
-                        FontSourceError::WriteFileFailed {
-                            path: dest.to_string_lossy().to_string(),
-                            source,
-                        }
-                    })?;
+            let self_hosted = if let Some((client, rel_prefix, dest)) = &client_dest {
+                if let Some(dest) = dest {
+                    let family_cache_root = client.family_cache_dir(&self.id);
+                    for (font_type, font_url) in &urls {
+                        let file_name =
+                            format!("{subset}-{weight}-{style}.{}", font_type.extension());
+                        let font_path = family_cache_root.join(&file_name);
+                        client.download_font_file(&font_path, font_url).await?;
+                        fs::copy(&font_path, dest).map_err(|source| {
+                            FontSourceError::WriteFileFailed {
+                                path: dest.to_string_lossy().to_string(),
+                                source,
+                            }
+                        })?;
+                    }
                 }
-                Some((*weight, *style, *subset))
+                Some(((*weight, *style, *subset), rel_prefix.as_path()))
             } else {
                 None
             };
-            let css_urls =
-                css_url_map(&urls, self_hosted.map(|v| (Path::new(&self.id), v))).join(",\n    ");
+            let css_urls = css_url_map(&urls, self_hosted).join(",\n    ");
             let mut css = format!(
                 r#"
 @font-face {{
@@ -253,21 +263,21 @@ pub struct FontSourceVariantSubset {
 /// Returns a list of CSS `src` entries for this variant subset.
 ///
 /// The optional `self_hosted` tuple shall include:
-/// - index 0: The relative path prefix used to construct a self-hosted URL (e.g., "fonts/roboto").
-/// - index 1: The weight, style, and subset to construct the file name (e.g., "latin-400-normal.woff2").
+/// - index 0: The weight, style, and subset to construct the file name (e.g., "latin-400-normal.woff2").
+/// - index 1: The relative path prefix used to construct a self-hosted URL (e.g., "../roboto").
 ///
 /// If `self_hosted` is not provided, the original URLs from the metadata (pointing to fontsource's CDN)
 /// will be used instead.
 pub fn css_url_map(
     map: &HashMap<&FontFileType, &String>,
-    self_hosted: Option<(&Path, (u16, &str, &str))>,
+    self_hosted: Option<((u16, &str, &str), &Path)>,
 ) -> Vec<String> {
     let mut src_parts = Vec::new();
     if let Some(u) = map.get(&FontFileType::Woff2)
         && !u.is_empty()
     {
         match &self_hosted {
-            Some((path_prefix, (weight, style, subset))) => {
+            Some(((weight, style, subset), path_prefix)) => {
                 let file_name = format!(
                     "{subset}-{weight}-{style}.{}",
                     FontFileType::Woff2.extension()
@@ -285,7 +295,7 @@ pub fn css_url_map(
         && !u.is_empty()
     {
         match &self_hosted {
-            Some((path_prefix, (weight, style, subset))) => {
+            Some(((weight, style, subset), path_prefix)) => {
                 let file_name = format!(
                     "{subset}-{weight}-{style}.{}",
                     FontFileType::Woff.extension()
@@ -303,7 +313,7 @@ pub fn css_url_map(
         && !u.is_empty()
     {
         match &self_hosted {
-            Some((path_prefix, (weight, style, subset))) => {
+            Some(((weight, style, subset), path_prefix)) => {
                 let file_name = format!(
                     "{subset}-{weight}-{style}.{}",
                     FontFileType::Ttf.extension()
@@ -326,7 +336,7 @@ mod tests {
 
     use super::*;
     use crate::{FontSourceClient, QueryBuilder};
-    use std::{collections::HashMap, fs, path::Path};
+    use std::{collections::HashMap, fs};
 
     fn test_family(ttf_url: &str) -> FontSourceFamily {
         let mut url_map = HashMap::new();
@@ -365,7 +375,7 @@ mod tests {
         assert!(
             css_url_map(
                 &empty,
-                Some((Path::new("roboto"), (400, "normal", "latin")))
+                Some(((400, "normal", "latin"), Path::new("../roboto")))
             )
             .is_empty()
         );
@@ -393,7 +403,10 @@ mod tests {
         let family = test_family(&ttf_url);
         let query = QueryBuilder::new("Roboto").build();
         let err = family
-            .to_css(&query, Some((&client, dest_dir.path())))
+            .to_css(
+                &query,
+                Some((&client, Path::new("../"), Some(dest_dir.path()))),
+            )
             .await
             .unwrap_err();
 

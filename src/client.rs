@@ -121,11 +121,12 @@ impl FontSourceClient {
         &self,
         py: Python<'py>,
         query: FontQuery,
-        dest: PathBuf,
+        relative_url_prefix: String,
+        dest: Option<PathBuf>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let this = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            this.css_self_hosted(&query, &dest)
+            this.css_self_hosted(&query, relative_url_prefix.as_str(), dest.as_deref())
                 .await
                 .map_err(PyErr::from)
         })
@@ -415,9 +416,16 @@ impl FontSourceClient {
     /// URLs are relative paths rooted in the given `dest` path. The copied font
     /// files in `dest` are organized in subdirectories by family ID
     /// (e.g. `dest/roboto/latin-400-normal.ttf`).
-    pub async fn css_self_hosted(&self, query: &FontQuery, dest: &Path) -> Result<String> {
+    pub async fn css_self_hosted(
+        &self,
+        query: &FontQuery,
+        relative_url_prefix: &str,
+        dest: Option<&Path>,
+    ) -> Result<String> {
         let family = self.load_family_metadata(query.family()).await?;
-        family.to_css(query, Some((self, dest))).await
+        family
+            .to_css(query, Some((self, Path::new(relative_url_prefix), dest)))
+            .await
     }
 }
 

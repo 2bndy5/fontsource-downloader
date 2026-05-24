@@ -50,21 +50,62 @@ async fn generate_self_hosted_css() {
     let ttf_name = variant_file("ttf");
     let dest = export_dir.join(&woff2_name);
 
-    let css = client.css_self_hosted(&query, &dest).await.unwrap();
+    let css = client
+        .css_self_hosted(&query, "", Some(&dest))
+        .await
+        .unwrap();
 
     let cache_family_dir = cache_root.path().join("families/roboto");
     let cached_font_woff2 = cache_family_dir.join(&woff2_name);
     let cached_font_woff = cache_family_dir.join(&woff_name);
     let cached_font_ttf = cache_family_dir.join(&ttf_name);
     let exported_font = dest;
+    let expected_prefix = "roboto";
 
     assert!(css.contains("@font-face"));
     assert!(css.contains("font-family: 'Roboto';"));
-    assert!(css.contains(format!(r#"url("roboto/{woff2_name}") format("woff2")"#).as_str()));
-    assert!(css.contains(format!(r#"url("roboto/{woff_name}") format("woff")"#).as_str()));
-    assert!(css.contains(format!(r#"url("roboto/{ttf_name}") format("truetype")"#).as_str()));
+    assert!(
+        css.contains(format!(r#"url("{expected_prefix}/{woff2_name}") format("woff2")"#).as_str())
+    );
+    assert!(
+        css.contains(format!(r#"url("{expected_prefix}/{woff_name}") format("woff")"#).as_str())
+    );
+    assert!(
+        css.contains(format!(r#"url("{expected_prefix}/{ttf_name}") format("truetype")"#).as_str())
+    );
     assert!(cached_font_woff2.exists());
     assert!(cached_font_woff.exists());
     assert!(cached_font_ttf.exists());
     assert!(exported_font.exists());
+}
+
+#[tokio::test]
+async fn generate_self_hosted_css_with_parent_prefix() {
+    let (_cache_root, client) = test_client();
+    let query = QueryBuilder::new("Roboto")
+        .with_file_type(FontFileType::Woff2)
+        .with_file_type(FontFileType::Woff)
+        .with_file_type(FontFileType::Ttf)
+        .build();
+
+    let rel_prefix = "../";
+
+    let css = client
+        .css_self_hosted(&query, rel_prefix, None)
+        .await
+        .unwrap();
+
+    let expected_prefix = format!("{rel_prefix}roboto");
+    let woff2_name = variant_file("woff2");
+    let woff_name = variant_file("woff");
+    let ttf_name = variant_file("ttf");
+    assert!(
+        css.contains(format!(r#"url("{expected_prefix}/{woff2_name}") format("woff2")"#).as_str())
+    );
+    assert!(
+        css.contains(format!(r#"url("{expected_prefix}/{woff_name}") format("woff")"#).as_str())
+    );
+    assert!(
+        css.contains(format!(r#"url("{expected_prefix}/{ttf_name}") format("truetype")"#).as_str())
+    );
 }
