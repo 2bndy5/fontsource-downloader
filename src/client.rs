@@ -58,25 +58,31 @@ impl FontSourceClient {
 
     /// Asynchronously download a font file matching the given query.
     ///
-    /// The `FontQuery.subset` field may be overridden with
+    /// The :py:attr:`FontQuery.subset` field may be overridden with
     /// the family's default subset if the requested subset is
     /// not available for the `FontQuery.family`.
     ///
-    /// Returns the `Path` to the downloaded font file.
+    /// Returns the ``list[Path]`` to the downloaded font files.
+    ///
     /// Throws an exception if the font could not be downloaded and/or
     /// the query is somehow invalid.
     ///
     /// This method automatically uses cached metadata and font files when available.
-    /// To configure the cache location, pass a `Path` to the `FontSourceClient` constructor.
-    #[pyo3(name = "download_font")]
+    /// To configure the cache location, pass a ``Path`` to the ``FontSourceClient``
+    /// constructor.
+    #[pyo3(
+        name = "download_font",
+        text_signature = "(query: FontQuery) -> list[Path]",
+        signature = (query),
+    )]
     pub fn download_font_py<'py>(
         &self,
         py: Python<'py>,
-        font: FontQuery,
+        query: FontQuery,
     ) -> PyResult<Bound<'py, PyAny>> {
         let this = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            this.download_font(&font).await.map_err(PyErr::from)
+            this.download_font(&query).await.map_err(PyErr::from)
         })
     }
 
@@ -85,7 +91,7 @@ impl FontSourceClient {
     /// Returns an error if
     ///
     /// - the cache was not previously populated with
-    ///   `FontSourceClient.download_font()`
+    ///   ``FontSourceClient.download_font()``
     /// - the cached JSON file was modified by external actors in a
     ///   way that causes deserialization errors.
     #[pyo3(name = "font_list_cache_info")]
@@ -98,16 +104,24 @@ impl FontSourceClient {
     /// Returns an error if
     ///
     /// - the cache was not previously populated with
-    ///   `FontSourceClient.download_font()`
+    ///   ``FontSourceClient.download_font()``
     /// - the cached JSON file was modified by external actors in a
     ///   way that causes deserialization errors.
-    #[pyo3(name = "family_cache_info")]
+    #[pyo3(
+        name = "family_cache_info",
+        text_signature = "(id: str) -> FamilyCacheInfo",
+        signature = (id),
+    )]
     pub fn family_cache_info_py(&self, id: &str) -> PyResult<FamilyCacheInfo> {
         self.family_cache_info(id).map_err(PyErr::from)
     }
 
     /// Generate CDN-based CSS for the requested `FontQuery` and return it as a string.
-    #[pyo3(name = "css")]
+    #[pyo3(
+        name = "css",
+        text_signature = "(query: FontQuery) -> str",
+        signature = (query),
+    )]
     pub fn css_py<'py>(&self, py: Python<'py>, query: FontQuery) -> PyResult<Bound<'py, PyAny>> {
         let this = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -115,9 +129,17 @@ impl FontSourceClient {
         })
     }
 
-    /// Generate self-hosted CSS (paths relative to the client's cache) for the requested `FontQuery`.
-    /// Missing files will be downloaded into the cache if necessary.
-    #[pyo3(name = "css_self_hosted")]
+    /// Generate self-hosted CSS for the requested ``query``.
+    ///
+    /// If ``dest`` path is given, the font files will be downloaded into the cache
+    /// (if necessary) and copied into the ``dest`` path.
+    ///
+    /// The returned CSS will use relative URLs appended to the given ``relative_url_prefix``.
+    #[pyo3(
+        name = "css_self_hosted",
+        text_signature = "(query: FontQuery, relative_url_prefix: str, dest: Optional[Path]) -> str",
+        signature = (query, relative_url_prefix, dest=None),
+    )]
     pub fn css_self_hosted_py<'py>(
         &self,
         py: Python<'py>,

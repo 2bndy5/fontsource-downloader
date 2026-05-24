@@ -30,16 +30,18 @@ features of the reqwest crate are enabled.
 ```python
 import asyncio # the only supported async runtime in python
 from pathlib import Path
-# enable logging before importing this library
-from fontsource_downloader import FontQuery, FontSourceClient, Weight
+# configure logging before importing this library
+from fontsource_downloader import (
+  FontQuery, FontSourceClient, Weight
+)
 
 client = FontSourceClient()
 query = FontQuery(
     family="Roboto",
     weights=[Weight(400)],
 )
-font_file: Path = await client.download_font(&query)
-# do what you want with the cached font file ...
+font_files: list[Path] = await client.download_font(query)
+# do what you want with the cached font files ...
 ```
 
 ### Rust
@@ -54,8 +56,11 @@ let client = FontSourceClient::new().unwrap();
 let query: FontQuery = QueryBuilder::new("Roboto")
     .with_weight(Weight::from(400))
     .build();
-let font_file: PathBuf = client.download_font(&query).await.unwrap();
-// do what you want with the cached font file ...
+let font_files: Vec<PathBuf> = client
+    .download_font(&query)
+    .await
+    .unwrap();
+// do what you want with the cached font files ...
 ```
 
 [fontsource]: https://fontsource.org/docs/api/introduction
