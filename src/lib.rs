@@ -16,12 +16,14 @@ pub(crate) mod responses;
 pub use responses::FontSourceFamily;
 
 pub(crate) mod query;
-pub use query::{FontQuery, Weight};
+pub use query::{FontFileType, FontQuery, QueryBuilder, Weight};
 
 /// A library to interface with Fontsource REST API.
 #[cfg(feature = "pyo3")]
 #[cfg_attr(feature = "pyo3", pymodule)]
 fn fontsource_downloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    pyo3_log::init();
+    m.add_class::<FontFileType>()?;
     m.add_class::<FontQuery>()?;
     m.add_class::<Weight>()?;
     m.add_class::<FontSourceClient>()?;

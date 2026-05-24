@@ -11,8 +11,17 @@ A library to download (and cache) fonts with [fontsource] REST API.
 
 ## Library Features
 
-- `async` compatible
-- caching enabled (with option to customize cache root dir)
+- Download a batch of fonts per family (based on the given query).
+- Asynchronous downloads with true parallelism.
+- Generate CSS `@font-face` rules. Both CDN URLs and self-hosting (relative path)
+  URLs are supported. Self-hosted font files can be optionally copied from cache
+  to a given destination directory.
+- Caching enabled (with option to customize cache root dir)
+  for both metadata and font files.
+- Minimal debug logs (when enabled).
+
+Rust consumers get to choose their desired TLS backend. Only the required
+features of the reqwest crate are enabled.
 
 ## Examples
 
@@ -21,12 +30,13 @@ A library to download (and cache) fonts with [fontsource] REST API.
 ```python
 import asyncio # the only supported async runtime in python
 from pathlib import Path
+# enable logging before importing this library
 from fontsource_downloader import FontQuery, FontSourceClient, Weight
 
 client = FontSourceClient()
 query = FontQuery(
     family="Roboto",
-    weight=Weight.Normal,
+    weights=[Weight(400)],
 )
 font_file: Path = await client.download_font(&query)
 # do what you want with the cached font file ...
@@ -36,14 +46,14 @@ font_file: Path = await client.download_font(&query)
 
 ```rust
 use std::path::PathBuf;
-use fontsource_downloader::{FontQuery, FontSourceClient, Weight};
+use fontsource_downloader::{
+    FontQuery, FontSourceClient, QueryBuilder, Weight,
+};
 
 let client = FontSourceClient::new().unwrap();
-let query = FontQuery {
-    family: "Roboto".to_string(),
-    weight: Weight::Normal,
-    ..Default::default()
-};
+let query: FontQuery = QueryBuilder::new("Roboto")
+    .with_weight(Weight::from(400))
+    .build();
 let font_file: PathBuf = client.download_font(&query).await.unwrap();
 // do what you want with the cached font file ...
 ```
