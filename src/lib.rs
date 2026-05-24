@@ -1,4 +1,10 @@
 #![doc = include_str!("../README.md")]
+#![doc(
+    html_favicon_url = "https://raw.githubusercontent.com/2bndy5/fontsource-downloader/main/docs/_static/favicon.ico"
+)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/2bndy5/fontsource-downloader/main/docs/_static/logo.png"
+)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 #[cfg(feature = "pyo3")]

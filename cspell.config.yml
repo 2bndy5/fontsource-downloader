@@ -3,18 +3,23 @@ words:
   - armhf
   - armv
   - asyncio
+  - autoclass
+  - automethod
+  - automodule
   - binstall
   - binutils
   - bndy
   - cdylib
   - clippy
   - cooldown
+  - currentmodule
   - Doherty
   - endfor
   - endmacro
   - esac
   - fontlist
   - fontsource
+  - furo
   - gnueabi
   - gnueabihf
   - hustcer

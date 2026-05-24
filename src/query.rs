@@ -419,6 +419,7 @@ impl Weight {
     ///
     /// The value will be rounded to the nearest standard weight (100, 200, ..., 900).
     #[new]
+    #[pyo3(signature = (value), text_signature = "(value: int) -> Weight")]
     pub fn new(value: i32) -> Self {
         (value.clamp(100, 900) as u16).into()
     }
