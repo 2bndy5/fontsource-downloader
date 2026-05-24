@@ -22,6 +22,7 @@ pub use query::{FontFileType, FontQuery, QueryBuilder, Weight};
 #[cfg(feature = "pyo3")]
 #[cfg_attr(feature = "pyo3", pymodule)]
 fn fontsource_downloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    pyo3_log::init();
     m.add_class::<FontFileType>()?;
     m.add_class::<FontQuery>()?;
     m.add_class::<Weight>()?;

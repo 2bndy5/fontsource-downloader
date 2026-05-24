@@ -190,6 +190,7 @@ impl FontSourceFamily {
                         let dest = dest.to_path_buf();
                         let client = (*client).to_owned();
                         let font_url = (*font_url).clone();
+                        log::debug!("Downloading font file: {}/{file_name}", self.id);
                         download_tasks.spawn(async move {
                             client.download_font_file(&font_path, &font_url).await?;
                             fs::copy(&font_path, &dest).map_err(|source| {

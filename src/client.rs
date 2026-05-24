@@ -192,6 +192,7 @@ impl FontSourceClient {
                 let font_path = family_cache_dir.join(&file_name);
                 let client = self.clone();
                 let font_url = font_url.to_string();
+                log::debug!("Downloading font file: {}/{file_name}", family.id);
                 download_tasks.spawn(async move {
                     client.download_font_file(&font_path, &font_url).await?;
                     Ok(font_path)

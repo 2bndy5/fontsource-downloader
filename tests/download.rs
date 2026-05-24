@@ -1,6 +1,7 @@
 use fontsource_downloader::{FontQuery, FontSourceClient, QueryBuilder};
 
 async fn test_download(query: &FontQuery) {
+    let _ = env_logger::builder().is_test(true).try_init();
     let tmp_cache_dir = tempfile::tempdir().unwrap();
     let client = FontSourceClient::with_cache_root(tmp_cache_dir.path()).unwrap();
     let font_paths = client.download_font(query).await.unwrap();

@@ -26,12 +26,15 @@ tokio = { version = "1.52.3", features = ["rt"] }
 
 pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py310"], optional = true }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"], optional = true }
+log = "0.4"
+pyo3-log = { version = "0.13.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["macros"] }
 reqwest = { version = "0.13", features = ["default-tls"] }
 mockito = "1.7.2"
+env_logger = "0.11"
 
 [features]
-pyo3 = ["dep:pyo3", "dep:pyo3-async-runtimes", "reqwest/default-tls"]
+pyo3 = ["dep:pyo3", "dep:pyo3-async-runtimes", "dep:pyo3-log", "reqwest/default-tls"]

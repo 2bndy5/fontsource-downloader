@@ -26,6 +26,7 @@ This project uses the following tools for development:
 [conventional commit]: https://www.conventionalcommits.org
 [git-cliff]: https://crates.io/crates/git-cliff
 [pre-commit]: https://pre-commit.com
+[prek]: https://github.com/j178/prek
 
 ## Submitting patches
 
@@ -55,7 +56,7 @@ This project's CI leverages [pre-commit] to ensure
 
 Normally, [pre-commit] is typically run from a Python virtual environment. This
 project has no other practical need for a Python virtual environment. Instead,
-[pre-commit] can be run as with a one-line command using [uv], [pipx], or [nur].
+[pre-commit] can be run as with a one-line command using [uv] or [pipx].
 
 ```shell
 pipx run pre-commit run --all-files
@@ -65,11 +66,13 @@ pipx run pre-commit run --all-files
 uvx pre-commit run --all-files
 ```
 
+The [nur] `pre-commit` task actually uses the [prek] (drop-in
+compatible) alternative to pre-commit.
+
 ```shell
 nur pre-commit
 ```
 
-By default, the [nur] `pre-commit` task uses the [uv] command stated above.
 Optional arguments are documented and shown in `nur pre-commit -h`.
 
 ### Static analysis
@@ -108,6 +111,14 @@ seconds. To use the CI test profile (which includes slow tests), simply pass
 nur test -p ci
 ```
 
+Python tests can also be run with
+
+```shell
+nur test py
+```
+
+Optionally pas `-c` to reinstall the python binding.
+
 #### Generate coverage data (for codecov)
 
 ```shell
@@ -117,10 +128,10 @@ nur test lcov
 #### Generate local HTML coverage report
 
 ```shell
-nut test llvm-cov
+nut test html
 ```
 
-Optional arguments are documented and shown in `nur test llvm-cov -h`.
+Optional arguments are documented and shown in `nur test html -h`.
 
 ## API documentation
 

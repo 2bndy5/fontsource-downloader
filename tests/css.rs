@@ -9,6 +9,7 @@ fn variant_file(ext: &str) -> String {
 }
 
 fn test_client() -> (tempfile::TempDir, FontSourceClient) {
+    let _ = env_logger::builder().is_test(true).try_init();
     let temp_root = tempfile::tempdir().unwrap();
     let client = FontSourceClient::with_cache_root(temp_root.path()).unwrap();
     (temp_root, client)
