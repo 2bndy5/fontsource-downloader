@@ -6,11 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- markdownlint-disable MD024 -->
 
+## [0.3.0] - 2026-05-24
+
+### <!-- 10 --> 💥 Breaking Changes
+
+- Support multi-variant download queries and CSS output by @2bndy5 in [#7](https://github.com/2bndy5/fontsource-downloader/pull/7)
+
+[0.3.0]: https://github.com/2bndy5/fontsource-downloader/compare/v0.2.0...v0.3.0
+
+Full commit diff: [`v0.2.0...v0.3.0`][0.3.0]
+
 ## [0.2.0] - 2026-05-22
 
 ### <!-- 1 --> 🚀 Added
 
 - Expose cached metadata by @2bndy5 in [#6](https://github.com/2bndy5/fontsource-downloader/pull/6)
+
+### <!-- 6 --> 📦 Dependency updates
+
+- Bump version to v0.2.0 by @2bndy5 in [`26ea2fb`](https://github.com/2bndy5/fontsource-downloader/commit/26ea2fb492191f0c15a23e5a355575a2e6b0a8eb)
 
 ### <!-- 8 --> 📝 Documentation
 
