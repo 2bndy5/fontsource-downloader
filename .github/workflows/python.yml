@@ -112,6 +112,7 @@ jobs:
             --release
             --out dist
             --interpreter ${{ matrix.python.version }}
+            ${{ matrix.platform.target == 'aarch64' && !startsWith(matrix.platform.manylinux, 'musllinux') && matrix.platform.runner == 'ubuntu-latest' && '--zig' || '' }}
             --features ${{ matrix.python.feature }}
           # zizmor: ignore[cache-poisoning]
           sccache: ${{ startsWith(github.ref, 'refs/tags') && 'false' || 'true' }}
