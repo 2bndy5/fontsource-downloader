@@ -6,7 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- markdownlint-disable MD024 -->
 
+## [0.3.2] - 2026-07-15
+
+### <!-- 6 --> 📦 Dependency updates
+
+- Bump the actions group across 1 directory with 6 updates by @dependabot[bot] in [#15](https://github.com/2bndy5/fontsource-downloader/pull/15)
+- Bump the uv group across 1 directory with 4 updates by @dependabot[bot] in [#14](https://github.com/2bndy5/fontsource-downloader/pull/14)
+- Bump soupsieve from 2.8.3 to 2.8.4 by @dependabot[bot] in [#16](https://github.com/2bndy5/fontsource-downloader/pull/16)
+- Bump the cargo group across 1 directory with 4 updates by @dependabot[bot] in [#13](https://github.com/2bndy5/fontsource-downloader/pull/13)
+
+[0.3.2]: https://github.com/2bndy5/fontsource-downloader/compare/v0.3.1...v0.3.2
+
+Full commit diff: [`v0.3.1...v0.3.2`][0.3.2]
+
 ## [0.3.1] - 2026-05-24
+
+### <!-- 6 --> 📦 Dependency updates
+
+- Bump version to v0.3.1 by @2bndy5 in [`ecbaec7`](https://github.com/2bndy5/fontsource-downloader/commit/ecbaec737e91fc7a4819611e7726c456a0989d63)
 
 ### <!-- 8 --> 📝 Documentation
 
