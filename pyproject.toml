@@ -13,9 +13,6 @@ classifiers = [
 license-files = ["LICENSE"]
 readme = "README.md"
 dynamic = ["version", "description", "license"]
-dependencies = [
-    "asyncio>=4.0.0",
-]
 
 [tool.maturin]
 features = ["pyo3"]
@@ -23,7 +20,6 @@ exclude = ["cspell.config.yml", "nurfile", "tests/*.rs"]
 
 [dependency-groups]
 dev = [
-    "maturin>=1.14.1",
     "mypy>=2.1.0",
     "pre-commit>=4.6.0",
     "ruff>=0.15.19",
