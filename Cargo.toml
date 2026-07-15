@@ -24,10 +24,10 @@ thiserror = "2.0"
 reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "system-proxy"] }
 tokio = { version = "1.52.3", features = ["rt"] }
 
-pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py310"], optional = true }
-pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"], optional = true }
+pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
+pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"], optional = true }
 log = "0.4"
-pyo3-log = { version = "0.13.3", optional = true }
+pyo3-log = { version = "0.13.4", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"

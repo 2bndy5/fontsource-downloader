@@ -27,6 +27,7 @@ words:
   - manylinux
   - maturin
   - msvc
+  - musllinux
   - mypy
   - nextest
   - nurfile
