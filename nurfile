@@ -194,4 +194,4 @@ def "nur pre-commit" [
     run-cmd ...$args
 }
 
-export alias "nur prek" = nur pre-commit
+export alias "nur pre" = nur pre-commit
