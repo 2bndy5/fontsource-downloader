@@ -121,7 +121,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ runner.os }}-${{ matrix.platform.target }}-${{ matrix.platform.manylinux || '_' }}
-          path: bindings/python/dist/*
+          path: dist/*
+          if-no-files-found: error
 
   sdist:
     runs-on: ubuntu-latest
