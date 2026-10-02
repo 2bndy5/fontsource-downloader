@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- markdownlint-disable MD024 -->
 
+## [0.3.3] - 2026-10-02
+
+### <!-- 6 --> 📦 Dependency updates
+
+- Bump quinn-proto from 0.11.14 to 0.11.16 by @dependabot[bot] in [#17](https://github.com/2bndy5/fontsource-downloader/pull/17)
+- Bump the actions group with 5 updates by @dependabot[bot] in [#20](https://github.com/2bndy5/fontsource-downloader/pull/20)
+- Bump the uv group with 3 updates by @dependabot[bot] in [#19](https://github.com/2bndy5/fontsource-downloader/pull/19)
+- Bump the cargo group with 5 updates by @dependabot[bot] in [#18](https://github.com/2bndy5/fontsource-downloader/pull/18)
+- Bump the cargo group with 3 updates by @dependabot[bot] in [#21](https://github.com/2bndy5/fontsource-downloader/pull/21)
+- Bump the uv group with 3 updates by @dependabot[bot] in [#22](https://github.com/2bndy5/fontsource-downloader/pull/22)
+- Bump the actions group with 3 updates by @dependabot[bot] in [#23](https://github.com/2bndy5/fontsource-downloader/pull/23)
+- Bump soupsieve from 2.8.4 to 2.9 by @dependabot[bot] in [#24](https://github.com/2bndy5/fontsource-downloader/pull/24)
+- Bump the cargo group with 2 updates by @dependabot[bot] in [#25](https://github.com/2bndy5/fontsource-downloader/pull/25)
+- Bump git-cliff in /.github in the pip group by @dependabot[bot] in [#26](https://github.com/2bndy5/fontsource-downloader/pull/26)
+- Bump the actions group with 3 updates by @dependabot[bot] in [#28](https://github.com/2bndy5/fontsource-downloader/pull/28)
+- Bump pyo3 and tokio by @2bndy5 in [#31](https://github.com/2bndy5/fontsource-downloader/pull/31)
+- Bump urllib3 from 2.7.0 to 2.8.0 by @dependabot[bot] in [#30](https://github.com/2bndy5/fontsource-downloader/pull/30)
+- Bump virtualenv from 21.3.3 to 21.7.13 by @dependabot[bot] in [#32](https://github.com/2bndy5/fontsource-downloader/pull/32)
+
+[0.3.3]: https://github.com/2bndy5/fontsource-downloader/compare/v0.3.2...v0.3.3
+
+Full commit diff: [`v0.3.2...v0.3.3`][0.3.3]
+
 ## [0.3.2] - 2026-07-15
 
 ### <!-- 6 --> 📦 Dependency updates
@@ -14,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump the uv group across 1 directory with 4 updates by @dependabot[bot] in [#14](https://github.com/2bndy5/fontsource-downloader/pull/14)
 - Bump soupsieve from 2.8.3 to 2.8.4 by @dependabot[bot] in [#16](https://github.com/2bndy5/fontsource-downloader/pull/16)
 - Bump the cargo group across 1 directory with 4 updates by @dependabot[bot] in [#13](https://github.com/2bndy5/fontsource-downloader/pull/13)
+- Bump version to v0.3.2 by @2bndy5 in [`0b4c222`](https://github.com/2bndy5/fontsource-downloader/commit/0b4c22235998019c8da8800ccbf488539e5ad787)
 
 [0.3.2]: https://github.com/2bndy5/fontsource-downloader/compare/v0.3.1...v0.3.2
 
