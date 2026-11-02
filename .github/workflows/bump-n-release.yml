@@ -35,7 +35,7 @@ jobs:
           fetch-tags: true
           persist-credentials: true # allow `git push`
 
-      - uses: cargo-bins/cargo-binstall@b874e25ea559687bec77e281e9b271aa1367b624 # v1.23.0
+      - uses: cargo-bins/cargo-binstall@81df5c23b0dc775b009efdfc9895c5965b7a4e40 # v1.26.1
       - run: cargo binstall -y git-cliff nu
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -65,7 +65,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - name: Generate a changelog
         run: >-
           uvx --constraints .github/requirements.txt
