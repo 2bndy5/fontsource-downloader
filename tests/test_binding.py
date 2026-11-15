@@ -1,7 +1,14 @@
 from pathlib import Path
+
 import pytest
 
-from fontsource_downloader import FontQuery, FontSourceClient, Weight
+from fontsource_downloader import (
+    FontQuery,
+    FontSourceClient,
+    FontSourceVariable,
+    VariableAxis,
+    Weight,
+)
 
 
 @pytest.mark.asyncio
@@ -38,3 +45,29 @@ def test_weight_enum():
     assert int(Weight.Bold) == int(Weight(767))
     assert int(Weight.ExtraBold) == int(Weight(888))
     assert int(Weight.Black) == int(Weight(100000))
+
+
+def test_variable_font_query():
+    query = FontQuery(
+        family="Inter",
+        variable=True,
+        append_variable_suffix=True,
+        axes=["wght", "slnt"],
+    )
+    assert query.family == "Inter"
+    assert query.variable is True
+    assert query.append_variable_suffix is True
+    assert set(query.axes) == {"wght", "slnt"}
+
+    axis = VariableAxis(default=400.0, min=100.0, max=900.0, step=1.0)
+    assert axis.default == 400.0
+    assert axis.min == 100.0
+    assert axis.max == 900.0
+    assert axis.step == 1.0
+
+    var = FontSourceVariable(family="Inter", axes={"wght": axis})
+    assert var.family == "Inter"
+    assert var.has_axis("wght") is True
+    assert var.has_axis("slnt") is False
+    assert var.weight_range() == (100.0, 900.0)
+    assert var.slant_range() is None

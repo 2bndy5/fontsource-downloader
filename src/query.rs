@@ -1,5 +1,7 @@
 use std::collections::{HashSet, hash_set::Iter};
 
+use crate::error::{FontSourceError, Result};
+
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,9 @@ pub struct FontQuery {
     weight: HashSet<Weight>,
     subset: HashSet<String>,
     pub(crate) file_type: HashSet<FontFileType>,
+    pub(crate) variable: bool,
+    pub(crate) append_variable_suffix: bool,
+    pub(crate) axes: HashSet<String>,
 }
 
 impl Default for FontQuery {
@@ -31,6 +36,9 @@ impl Default for FontQuery {
     /// - `weight` = [`Weight::Normal`]
     /// - `subset` = `"latin"`
     /// - `file_type` = [`FontFileType::Ttf`]
+    /// - `variable` = `false`
+    /// - `append_variable_suffix` = `false`
+    /// - `axes` = empty
     fn default() -> Self {
         Self {
             family: String::from("Roboto"),
@@ -38,6 +46,9 @@ impl Default for FontQuery {
             weight: HashSet::from_iter([Weight::default()]),
             subset: HashSet::from_iter([String::from("latin")]),
             file_type: HashSet::from_iter([FontFileType::default()]),
+            variable: false,
+            append_variable_suffix: false,
+            axes: HashSet::new(),
         }
     }
 }
@@ -66,6 +77,9 @@ pub struct QueryBuilder {
     weight: HashSet<Weight>,
     subset: HashSet<String>,
     file_type: HashSet<FontFileType>,
+    variable: bool,
+    append_variable_suffix: bool,
+    axes: HashSet<String>,
 }
 
 impl From<FontQuery> for QueryBuilder {
@@ -82,6 +96,9 @@ impl From<&FontQuery> for QueryBuilder {
             weight: value.weight.clone(),
             subset: value.subset.clone(),
             file_type: value.file_type.clone(),
+            variable: value.variable,
+            append_variable_suffix: value.append_variable_suffix,
+            axes: value.axes.clone(),
         }
     }
 }
@@ -164,6 +181,54 @@ impl QueryBuilder {
         }
     }
 
+    /// Set whether to download / synthesize a variable font.
+    ///
+    /// If `true`, the query will target the variable font package/files.
+    /// Default is `false`.
+    pub fn with_variable(self, variable: bool) -> Self {
+        Self { variable, ..self }
+    }
+
+    /// Set whether to append `" Variable"` to the font-family in generated CSS
+    /// if the family name does not already end with `" Variable"` (case-insensitive).
+    ///
+    /// Default is `false`.
+    pub fn with_variable_suffix(self, append_variable_suffix: bool) -> Self {
+        Self {
+            append_variable_suffix,
+            ..self
+        }
+    }
+
+    /// Add a targeted variable font axis (e.g. "wght", "wdth", "slnt", "opsz", "full").
+    ///
+    /// If no axes are specified when `variable` is `true`, it defaults to targeting "wght".
+    pub fn with_axis(self, axis: &str) -> Self {
+        let mut axes = self.axes;
+        axes.insert(axis.trim().to_lowercase());
+        Self { axes, ..self }
+    }
+
+    /// Add multiple targeted variable font axes.
+    ///
+    /// Multiple registered standard axes use Fontsource's `"standard"` resource when the
+    /// family publishes all selected axes. Combinations that include custom axes are rejected
+    /// because the API metadata does not confirm a combined resource for them.
+    pub fn with_axes<I, S>(self, axes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut target_axes = self.axes;
+        for axis in axes {
+            target_axes.insert(axis.as_ref().trim().to_lowercase());
+        }
+        Self {
+            axes: target_axes,
+            ..self
+        }
+    }
+
     /// Build the [`FontQuery`] from this builder.
     ///
     /// This applies default values for any fields that were not set.
@@ -186,9 +251,18 @@ impl QueryBuilder {
             self.subset
         };
         let file_type = if self.file_type.is_empty() {
-            HashSet::from_iter([FontFileType::Ttf])
+            if self.variable {
+                HashSet::from_iter([FontFileType::Woff2])
+            } else {
+                HashSet::from_iter([FontFileType::Ttf])
+            }
         } else {
             self.file_type
+        };
+        let axes = if self.variable && self.axes.is_empty() {
+            HashSet::from_iter(["wght".to_string()])
+        } else {
+            self.axes
         };
         FontQuery {
             family: self.family,
@@ -196,6 +270,9 @@ impl QueryBuilder {
             weight,
             subset,
             file_type,
+            variable: self.variable,
+            append_variable_suffix: self.append_variable_suffix,
+            axes,
         }
     }
 }
@@ -224,6 +301,120 @@ impl FontQuery {
     /// An iterator over the file types in this query.
     pub fn file_types(&'_ self) -> Iter<'_, FontFileType> {
         self.file_type.iter()
+    }
+
+    /// Whether this query targets variable fonts.
+    pub fn is_variable(&self) -> bool {
+        self.variable
+    }
+
+    /// Whether to append `" Variable"` suffix to the family name in synthesized CSS.
+    pub fn append_variable_suffix(&self) -> bool {
+        self.append_variable_suffix
+    }
+
+    /// An iterator over the targeted variable axes in this query.
+    pub fn axes(&self) -> Iter<'_, String> {
+        self.axes.iter()
+    }
+
+    pub(crate) fn variable_resource_axis(
+        &self,
+        available_axes: &HashSet<String>,
+        axis_registry: Option<&HashSet<String>>,
+    ) -> Result<String> {
+        const STANDARD_AXES: [&str; 5] = ["ital", "opsz", "slnt", "wght", "wdth"];
+
+        if self.axes.contains("full") {
+            return Ok("full".to_string());
+        }
+
+        let mut axes = self
+            .axes
+            .iter()
+            .filter(|axis| axis.as_str() != "standard")
+            .cloned()
+            .collect::<Vec<_>>();
+        axes.sort();
+
+        if axes.is_empty() && !self.axes.contains("standard") {
+            return Ok("wght".to_string());
+        }
+
+        let published_standard_axes = axis_registry.map(|registry| {
+            available_axes
+                .iter()
+                .filter(|axis| {
+                    STANDARD_AXES.contains(&axis.as_str())
+                        && registry
+                            .iter()
+                            .any(|registered| registered.eq_ignore_ascii_case(axis))
+                })
+                .cloned()
+                .collect::<HashSet<_>>()
+        });
+        let is_published_standard_axis = |axis: &str| {
+            published_standard_axes
+                .as_ref()
+                .is_some_and(|published| published.contains(&axis.to_lowercase()))
+        };
+        let all_axes_are_published_standard =
+            !axes.is_empty() && axes.iter().all(|axis| is_published_standard_axis(axis));
+
+        if self.axes.contains("standard") {
+            if axes.is_empty() {
+                if published_standard_axes
+                    .as_ref()
+                    .is_some_and(|published| !published.is_empty())
+                {
+                    return Ok("standard".to_string());
+                }
+            } else if all_axes_are_published_standard {
+                return Ok("standard".to_string());
+            }
+        } else if axes.len() == 1 {
+            return Ok(axes.remove(0));
+        } else if all_axes_are_published_standard {
+            return Ok("standard".to_string());
+        }
+
+        Err(FontSourceError::FontVariantNotAvailable {
+            family: self.family.clone(),
+            field: "axes",
+            requested_value: if axes.is_empty() {
+                "standard".to_string()
+            } else {
+                axes.join(",")
+            },
+        })
+    }
+
+    pub(crate) fn requires_axis_registry(&self) -> bool {
+        if self.axes.contains("full") {
+            return false;
+        }
+        self.axes.contains("standard")
+            || self
+                .axes
+                .iter()
+                .filter(|axis| axis.as_str() != "standard")
+                .count()
+                > 1
+    }
+
+    pub(crate) fn validate_variable_file_type(&self) -> Result<()> {
+        if self.file_type.contains(&FontFileType::Woff2) {
+            return Ok(());
+        }
+        Err(FontSourceError::FontVariantNotAvailable {
+            family: self.family.clone(),
+            field: "file_type",
+            requested_value: self
+                .file_types()
+                .map(FontFileType::extension)
+                .collect::<Vec<&str>>()
+                .join(","),
+        })
     }
 
     pub(crate) fn filter_subsets<'a>(&'a self, available: &[String]) -> Vec<&'a String> {
@@ -260,20 +451,29 @@ impl FontQuery {
     /// - ``styles=["normal"]``
     /// - ``weights=[Weight(400)]``
     /// - ``subsets=["latin"]``
-    /// - ``file_types=[FontFileType.Ttf]``
+    /// - ``file_types=[FontFileType.Ttf]`` (or ``[FontFileType.Woff2]`` if ``variable=True``)
+    /// - ``variable=False``
+    /// - ``append_variable_suffix=False``
+    /// - ``axes=["wght"]`` (if ``variable=True``)
     #[new]
     #[pyo3(
-        signature = (family, styles=None, weights=None, subsets=None, file_types=None),
-        text_signature = "(family: str, styles: str | None = None, weights: list[Weight] | None = None, subsets: list[str] | None = None, file_types: list[FontFileType] | None = None) -> FontQuery"
+        signature = (family, styles=None, weights=None, subsets=None, file_types=None, variable=false, append_variable_suffix=false, axes=None),
+        text_signature = "(family: str, styles: list[str] | None = None, weights: list[Weight] | None = None, subsets: list[str] | None = None, file_types: list[FontFileType] | None = None, variable: bool = False, append_variable_suffix: bool = False, axes: list[str] | None = None) -> FontQuery"
     )]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_py(
         family: String,
         styles: Option<Vec<String>>,
         weights: Option<Vec<Weight>>,
         subsets: Option<Vec<String>>,
         file_types: Option<Vec<FontFileType>>,
+        variable: bool,
+        append_variable_suffix: bool,
+        axes: Option<Vec<String>>,
     ) -> Self {
-        let mut result = QueryBuilder::new(&family);
+        let mut result = QueryBuilder::new(&family)
+            .with_variable(variable)
+            .with_variable_suffix(append_variable_suffix);
         if let Some(styles) = styles {
             for style in styles {
                 result = result.with_style(&style);
@@ -292,6 +492,11 @@ impl FontQuery {
         if let Some(file_types) = file_types {
             for file_type in file_types {
                 result = result.with_file_type(file_type);
+            }
+        }
+        if let Some(axes) = axes {
+            for axis in axes {
+                result = result.with_axis(&axis);
             }
         }
         result.build()
@@ -325,6 +530,24 @@ impl FontQuery {
     #[getter]
     pub fn get_file_types(&self) -> Vec<FontFileType> {
         self.file_types().cloned().collect()
+    }
+
+    /// Whether this query targets variable fonts.
+    #[getter]
+    pub fn get_variable(&self) -> bool {
+        self.variable
+    }
+
+    /// Whether to append `" Variable"` suffix to the family name in synthesized CSS.
+    #[getter]
+    pub fn get_append_variable_suffix(&self) -> bool {
+        self.append_variable_suffix
+    }
+
+    /// A ``list`` of the targeted variable axes in this query.
+    #[getter]
+    pub fn get_axes(&self) -> Vec<String> {
+        self.axes.iter().cloned().collect()
     }
 }
 
@@ -432,6 +655,8 @@ impl Weight {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -507,5 +732,139 @@ mod tests {
             default_query.subsets().collect::<Vec<&String>>(),
             vec!["latin"]
         );
+        assert!(!default_query.is_variable());
+        assert!(!default_query.append_variable_suffix());
+        assert!(default_query.axes().collect::<Vec<&String>>().is_empty());
+    }
+
+    #[test]
+    fn font_query_default_trait() {
+        let query = FontQuery::default();
+
+        assert_eq!(query.family(), "Roboto");
+        assert_eq!(
+            query.styles().map(String::as_str).collect::<Vec<_>>(),
+            vec!["normal"]
+        );
+        assert_eq!(
+            query.weights().copied().collect::<Vec<_>>(),
+            vec![Weight::Normal]
+        );
+        assert_eq!(
+            query.subsets().map(String::as_str).collect::<Vec<_>>(),
+            vec!["latin"]
+        );
+        assert_eq!(
+            query.file_types().copied().collect::<Vec<_>>(),
+            vec![FontFileType::Ttf]
+        );
+        assert!(!query.is_variable());
+        assert!(!query.append_variable_suffix());
+        assert!(query.axes().next().is_none());
+    }
+
+    #[test]
+    fn variable_query_builder() {
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_variable_suffix(true)
+            .with_axis("slnt")
+            .with_axes(["wght", "wdth"])
+            .build();
+
+        assert!(query.is_variable());
+        assert!(query.append_variable_suffix());
+        assert_eq!(
+            query.file_types().collect::<Vec<&FontFileType>>(),
+            vec![&FontFileType::Woff2]
+        );
+        let axes: HashSet<&str> = query.axes().map(|s| s.as_str()).collect();
+        assert!(axes.contains("slnt"));
+        assert!(axes.contains("wght"));
+        assert!(axes.contains("wdth"));
+
+        // Default axes when variable is true but no axes specified
+        let default_var = QueryBuilder::new("Inter").with_variable(true).build();
+        assert!(default_var.is_variable());
+        let def_axes: Vec<&str> = default_var.axes().map(|s| s.as_str()).collect();
+        assert_eq!(def_axes, vec!["wght"]);
+        assert_eq!(
+            default_var.file_types().collect::<Vec<&FontFileType>>(),
+            vec![&FontFileType::Woff2]
+        );
+    }
+
+    #[test]
+    fn variable_resource_axis_selection() {
+        let available_axes = HashSet::from([
+            "ital".to_string(),
+            "opsz".to_string(),
+            "wght".to_string(),
+            "wdth".to_string(),
+            "grad".to_string(),
+        ]);
+        let axis_registry = HashSet::from([
+            "ital".to_string(),
+            "opsz".to_string(),
+            "slnt".to_string(),
+            "wght".to_string(),
+            "wdth".to_string(),
+            "GRAD".to_string(),
+        ]);
+        let query = FontQuery::default();
+        assert_eq!(
+            query.variable_resource_axis(&available_axes, None).unwrap(),
+            "wght"
+        );
+
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axis("wdth")
+            .build();
+        assert_eq!(
+            query.variable_resource_axis(&available_axes, None).unwrap(),
+            "wdth"
+        );
+
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "wdth", "ital"])
+            .build();
+        assert_eq!(
+            query
+                .variable_resource_axis(&available_axes, Some(&axis_registry))
+                .unwrap(),
+            "standard"
+        );
+
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "GRAD"])
+            .build();
+        assert!(matches!(
+            query.variable_resource_axis(&available_axes, Some(&axis_registry)),
+            Err(FontSourceError::FontVariantNotAvailable { field: "axes", .. })
+        ));
+
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "standard"])
+            .build();
+        assert_eq!(
+            query
+                .variable_resource_axis(&available_axes, Some(&axis_registry))
+                .unwrap(),
+            "standard"
+        );
+
+        let unavailable_standard_axis = HashSet::from(["ital".to_string()]);
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "wdth"])
+            .build();
+        assert!(matches!(
+            query.variable_resource_axis(&unavailable_standard_axis, Some(&axis_registry)),
+            Err(FontSourceError::FontVariantNotAvailable { field: "axes", .. })
+        ));
     }
 }

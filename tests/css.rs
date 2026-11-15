@@ -1,6 +1,4 @@
-use std::fs;
-
-use fontsource_downloader::{FontFileType, FontSourceClient, QueryBuilder};
+use fontsource_downloader::{FontFileType, FontSourceClient, QueryBuilder, Weight};
 
 const VARIANT_BASENAME: &str = "latin-400-normal";
 
@@ -38,32 +36,37 @@ async fn generate_cdn_css() {
 #[tokio::test]
 async fn generate_self_hosted_css() {
     let (tmp, client) = test_client();
-    let query = QueryBuilder::new("Material Icons")
+    let query = QueryBuilder::new("Roboto")
+        .with_weight(Weight::Normal)
+        .with_weight(Weight::Bold)
+        .with_style("normal")
+        .with_style("italic")
         .with_file_type(FontFileType::Woff2)
         .build();
 
     let export_dir = tmp.path().join("export");
-    fs::create_dir_all(&export_dir).unwrap();
-    let woff2_name = variant_file("woff2");
-    let dest = export_dir.join(&woff2_name);
+    let woff2_names = [
+        "latin-400-normal.woff2",
+        "latin-400-italic.woff2",
+        "latin-700-normal.woff2",
+        "latin-700-italic.woff2",
+    ];
 
     let css = client
-        .css_self_hosted(&query, "", Some(&dest))
+        .css_self_hosted(&query, "", Some(&export_dir))
         .await
         .unwrap();
 
-    let cache_family_dir = tmp.path().join("families/material-icons");
-    let cached_font_woff2 = cache_family_dir.join(&woff2_name);
-    let exported_font = dest;
-    let expected_prefix = "material-icons";
+    let cache_family_dir = tmp.path().join("families/roboto");
+    let export_family_dir = export_dir.join("roboto");
 
     assert!(css.contains("@font-face"));
-    assert!(css.contains("font-family: 'Material Icons';"));
-    assert!(
-        css.contains(format!(r#"url("{expected_prefix}/{woff2_name}") format("woff2")"#).as_str())
-    );
-    assert!(cached_font_woff2.exists());
-    assert!(exported_font.exists());
+    assert!(css.contains("font-family: 'Roboto';"));
+    for file_name in woff2_names {
+        assert!(css.contains(format!(r#"url("roboto/{file_name}") format("woff2")"#).as_str()));
+        assert!(cache_family_dir.join(file_name).is_file());
+        assert!(export_family_dir.join(file_name).is_file());
+    }
 }
 
 #[tokio::test]

@@ -31,6 +31,7 @@ words:
   - mypy
   - nextest
   - nurfile
+  - opsz
   - pathlib
   - pipx
   - prek
@@ -48,9 +49,12 @@ words:
   - sccache
   - sdist
   - serde
+  - slnt
   - staticmethod
   - thiserror
   - venv
+  - wdth
+  - wght
   - zizmor
 ignorePaths:
   - .venv/

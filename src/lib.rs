@@ -16,10 +16,10 @@ mod client;
 pub use client::FontSourceClient;
 
 pub(crate) mod caching;
-pub use caching::{FamilyCacheInfo, FontListCacheInfo};
+pub use caching::{FamilyCacheInfo, FontListCacheInfo, VariableCacheInfo};
 
 pub(crate) mod responses;
-pub use responses::FontSourceFamily;
+pub use responses::{FontSourceFamily, FontSourceVariable, VariableAxis};
 
 pub(crate) mod query;
 pub use query::{FontFileType, FontQuery, QueryBuilder, Weight};
@@ -36,5 +36,8 @@ fn fontsource_downloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FontListCacheInfo>()?;
     m.add_class::<FamilyCacheInfo>()?;
     m.add_class::<FontSourceFamily>()?;
+    m.add_class::<VariableAxis>()?;
+    m.add_class::<FontSourceVariable>()?;
+    m.add_class::<VariableCacheInfo>()?;
     Ok(())
 }
