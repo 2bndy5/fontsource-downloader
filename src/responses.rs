@@ -169,7 +169,8 @@ impl FontSourceFamily {
     /// - index 0: The `FontSourceClient` to use for downloading font files
     /// - index 1: A relative path prefix. The family ID is always appended to this prefix
     ///   when building URL paths (e.g., `""` -> `"roboto/font-file"`, `".."` -> `"../roboto/font-file"`).
-    /// - index 2: An optional path to copy downloaded font files to.
+    /// - index 2: An optional destination directory for copied font files.
+    ///   The family ID and font filename are appended to this path.
     ///   If omitted, files are not copied.
     ///
     /// If `client_dest` is not provided, metadata URLs (CDN) are used directly.
@@ -197,12 +198,19 @@ impl FontSourceFamily {
                         let file_name =
                             format!("{subset}-{weight}-{style}.{}", font_type.extension());
                         let font_path = family_cache_root.join(&file_name);
-                        let dest = dest.to_path_buf();
+                        let dest_dir = dest.join(&self.id);
+                        let dest = dest_dir.join(&file_name);
                         let client = (*client).to_owned();
                         let font_url = (*font_url).clone();
                         log::debug!("Downloading font file: {}/{file_name}", self.id);
                         download_tasks.spawn(async move {
                             client.download_font_file(&font_path, &font_url).await?;
+                            fs::create_dir_all(&dest_dir).map_err(|source| {
+                                FontSourceError::WriteFileFailed {
+                                    path: dest_dir.to_string_lossy().to_string(),
+                                    source,
+                                }
+                            })?;
                             fs::copy(&font_path, &dest).map_err(|source| {
                                 FontSourceError::WriteFileFailed {
                                     path: dest.to_string_lossy().to_string(),
@@ -256,6 +264,8 @@ impl FontSourceFamily {
                 family: self.family.clone(),
             });
         }
+        query.validate_variable_file_type()?;
+        var_meta.validate_query_axes(&self.family, query)?;
 
         let mut result = String::new();
         let mut download_tasks = JoinSet::new();
@@ -272,11 +282,7 @@ impl FontSourceFamily {
             filtered_styles.into_iter().map(|s| s.as_str()).collect()
         };
 
-        let axes: Vec<&str> = if query.axes().len() == 0 {
-            vec!["wght"]
-        } else {
-            query.axes().map(|a| a.as_str()).collect()
-        };
+        let axis = query.variable_resource_axis();
 
         let family_name = if query.append_variable_suffix()
             && !self.family.to_lowercase().ends_with(" variable")
@@ -313,64 +319,73 @@ impl FontSourceFamily {
                     && let Some((min_s, max_s)) = var_meta.slant_range()
                 {
                     if (min_s - max_s).abs() < f64::EPSILON {
-                        format!("oblique {min_s:.0}deg")
+                        format!("oblique {}deg", css_angle_from_slnt(min_s))
                     } else {
-                        format!("oblique {min_s:.0}deg {max_s:.0}deg")
+                        format!(
+                            "oblique {}deg {}deg",
+                            css_angle_from_slnt(max_s),
+                            css_angle_from_slnt(min_s)
+                        )
                     }
                 } else {
                     style.to_string()
                 };
 
-                for axis in &axes {
-                    let file_name = format!("{subset}-{axis}-{style}.woff2");
-                    let cdn_url = format!(
-                        "https://cdn.jsdelivr.net/fontsource/fonts/{}:vf@latest/{file_name}",
-                        self.id
-                    );
+                let file_name = format!("{subset}-{axis}-{style}.woff2");
+                let cdn_url = format!(
+                    "https://cdn.jsdelivr.net/fontsource/fonts/{}:vf@latest/{file_name}",
+                    self.id
+                );
 
-                    let src_entry = if let Some((client, rel_prefix, dest)) = &client_dest {
-                        if let Some(dest) = dest {
-                            let family_cache_root = client.family_cache_dir(&self.id);
-                            let font_path = family_cache_root.join(&file_name);
-                            let dest = dest.to_path_buf();
-                            let client = (*client).to_owned();
-                            let font_url = cdn_url.clone();
-                            log::debug!("Downloading variable font file: {}/{file_name}", self.id);
-                            download_tasks.spawn(async move {
-                                client.download_font_file(&font_path, &font_url).await?;
-                                fs::copy(&font_path, &dest).map_err(|source| {
-                                    FontSourceError::WriteFileFailed {
-                                        path: dest.to_string_lossy().to_string(),
-                                        source,
-                                    }
-                                })?;
-                                Ok(())
-                            });
-                        }
-                        let full_path = rel_prefix.join(&file_name);
-                        format!(
-                            r#"url("{}") format("woff2-variations")"#,
-                            full_path.to_string_lossy().replace('\\', "/")
-                        )
-                    } else {
-                        format!(r#"url("{cdn_url}") format("woff2-variations")"#)
-                    };
+                let src_entry = if let Some((client, rel_prefix, dest)) = &client_dest {
+                    if let Some(dest) = dest {
+                        let family_cache_root = client.family_cache_dir(&self.id);
+                        let font_path = family_cache_root.join(&file_name);
+                        let dest_dir = dest.join(&self.id);
+                        let dest = dest_dir.join(&file_name);
+                        let client = (*client).to_owned();
+                        let font_url = cdn_url.clone();
+                        log::debug!("Downloading variable font file: {}/{file_name}", self.id);
+                        download_tasks.spawn(async move {
+                            client.download_font_file(&font_path, &font_url).await?;
+                            fs::create_dir_all(&dest_dir).map_err(|source| {
+                                FontSourceError::WriteFileFailed {
+                                    path: dest_dir.to_string_lossy().to_string(),
+                                    source,
+                                }
+                            })?;
+                            fs::copy(&font_path, &dest).map_err(|source| {
+                                FontSourceError::WriteFileFailed {
+                                    path: dest.to_string_lossy().to_string(),
+                                    source,
+                                }
+                            })?;
+                            Ok(())
+                        });
+                    }
+                    let full_path = rel_prefix.join(&file_name);
+                    format!(
+                        r#"url("{}") format("woff2-variations")"#,
+                        full_path.to_string_lossy().replace('\\', "/")
+                    )
+                } else {
+                    format!(r#"url("{cdn_url}") format("woff2-variations")"#)
+                };
 
-                    let mut css = format!(
-                        r#"
+                let mut css = format!(
+                    r#"
 @font-face {{
   font-family: '{family_name}';
   font-style: {style_css};
   font-weight: {weight_css};
   src:
     {src_entry};"#
-                    );
-                    if let Some(range) = self.unicode_range.get(*subset) {
-                        css.push_str(&format!("\n  unicode-range: {range};"));
-                    }
-                    css.push_str("\n}\n");
-                    result.push_str(&css);
+                );
+                if let Some(range) = self.unicode_range.get(*subset) {
+                    css.push_str(&format!("\n  unicode-range: {range};"));
                 }
+                css.push_str("\n}\n");
+                result.push_str(&css);
             }
         }
 
@@ -382,6 +397,10 @@ impl FontSourceFamily {
 
         Ok(result)
     }
+}
+
+fn css_angle_from_slnt(angle: f64) -> f64 {
+    if angle == 0.0 { 0.0 } else { -angle }
 }
 
 fn deserialize_f64_or_string<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
@@ -539,6 +558,27 @@ impl FontSourceVariable {
     /// Check whether a specific axis tag (e.g. "wght", "slnt", "wdth", "opsz") is available.
     pub fn has_axis(&self, tag: &str) -> bool {
         self.axes.contains_key(tag)
+    }
+
+    pub(crate) fn validate_query_axes(&self, family: &str, query: &FontQuery) -> Result<()> {
+        let mut axes: Vec<&str> = query.axes().map(String::as_str).collect();
+        if axes.is_empty() {
+            axes.push("wght");
+        }
+        for axis in axes {
+            let available = self
+                .axes
+                .keys()
+                .find(|tag| tag.eq_ignore_ascii_case(axis))
+                .is_some_and(|tag| self.has_axis(tag));
+            if !available && axis != "full" && axis != "standard" {
+                return Err(FontSourceError::AxisNotAvailable {
+                    family: family.to_string(),
+                    axis: axis.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Get the axis metadata for a given tag.
@@ -735,9 +775,8 @@ mod tests {
         let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
         fs::create_dir_all(client.family_cache_dir("roboto")).unwrap();
 
-        // Passing a directory as destination makes fs::copy fail and should map
-        // to FontSourceError::WriteFileFailed in FontSourceFamily::to_css.
         let dest_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dest_dir.path().join("roboto").join("latin-400-normal.ttf")).unwrap();
         let family = test_family(&ttf_url);
         let query = QueryBuilder::new("Roboto").build();
         let err = family
@@ -827,8 +866,8 @@ mod tests {
             "slnt".to_string(),
             VariableAxis {
                 default: 0.0,
-                min: -10.0,
-                max: 0.0,
+                min: -10.5,
+                max: 0.25,
                 step: 1.0,
             },
         );
@@ -851,6 +890,31 @@ mod tests {
             r#"url("https://cdn.jsdelivr.net/fontsource/fonts/inter:vf@latest/latin-wght-normal.woff2") format("woff2-variations")"#
         ));
         assert!(css_basic.contains("unicode-range: U+0000-00FF;"));
+
+        let query_multiple_axes = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "slnt"])
+            .build();
+        let css_multiple_axes = family
+            .to_variable_css(&query_multiple_axes, &var_meta, None)
+            .await
+            .unwrap();
+        assert_eq!(css_multiple_axes.matches("@font-face").count(), 1);
+        assert!(css_multiple_axes.contains(
+            r#"url("https://cdn.jsdelivr.net/fontsource/fonts/inter:vf@latest/latin-standard-normal.woff2") format("woff2-variations")"#
+        ));
+        assert!(!css_multiple_axes.contains("latin-wght-normal.woff2"));
+        assert!(!css_multiple_axes.contains("latin-slnt-normal.woff2"));
+
+        let query_full_axes = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axis("full")
+            .build();
+        let css_full_axes = family
+            .to_variable_css(&query_full_axes, &var_meta, None)
+            .await
+            .unwrap();
+        assert!(css_full_axes.contains("latin-full-normal.woff2"));
 
         // 2. Opt-in suffix appends " Variable"
         let query_suffix = QueryBuilder::new("Inter")
@@ -882,7 +946,7 @@ mod tests {
             .to_variable_css(&query_oblique, &var_meta, None)
             .await
             .unwrap();
-        assert!(css_oblique.contains("font-style: oblique -10deg 0deg;"));
+        assert!(css_oblique.contains("font-style: oblique -0.25deg 10.5deg;"));
 
         // 4. Non-variable font family errors
         let mut non_var_family = family.clone();
@@ -909,7 +973,10 @@ mod tests {
             family: family.family.clone(),
             axes: HashMap::new(),
         };
-        let query = FontQuery::default();
+        let query = QueryBuilder::new("Roboto")
+            .with_variable(true)
+            .with_axis("full")
+            .build();
         let css = family
             .to_variable_css(&query, &var_meta, None)
             .await
@@ -918,7 +985,7 @@ mod tests {
         assert!(css.contains("font-style: normal;"));
         assert!(css.contains("font-weight: 400;"));
         assert!(css.contains(
-            r#"url("https://cdn.jsdelivr.net/fontsource/fonts/roboto:vf@latest/latin-wght-normal.woff2") format("woff2-variations")"#
+            r#"url("https://cdn.jsdelivr.net/fontsource/fonts/roboto:vf@latest/latin-full-normal.woff2") format("woff2-variations")"#
         ));
         assert!(!css.contains("unicode-range:"));
 
@@ -949,9 +1016,9 @@ mod tests {
         axes.insert(
             "slnt".to_string(),
             VariableAxis {
-                default: -10.0,
-                min: -10.0,
-                max: -10.0,
+                default: -10.5,
+                min: -10.5,
+                max: -10.5,
                 step: 1.0,
             },
         );
@@ -969,7 +1036,112 @@ mod tests {
             .unwrap();
 
         assert!(css.contains("font-weight: 600;"));
-        assert!(css.contains("font-style: oblique -10deg;"));
+        assert!(css.contains("font-style: oblique 10.5deg;"));
+    }
+
+    #[tokio::test]
+    async fn variable_css_rejects_unavailable_axis_for_cdn_and_self_hosted() {
+        let mut family = test_family("");
+        family.variable = true;
+        let var_meta = FontSourceVariable {
+            family: family.family.clone(),
+            axes: HashMap::from([(
+                "wght".to_string(),
+                VariableAxis {
+                    default: 400.0,
+                    min: 100.0,
+                    max: 900.0,
+                    step: 1.0,
+                },
+            )]),
+        };
+        let query = QueryBuilder::new("Roboto")
+            .with_variable(true)
+            .with_axis("wdth")
+            .build();
+
+        let err = family
+            .to_variable_css(&query, &var_meta, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FontSourceError::AxisNotAvailable { family, axis }
+                if family == "Roboto" && axis == "wdth"
+        ));
+
+        let cache_root = tempfile::tempdir().unwrap();
+        let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
+        let err = family
+            .to_variable_css(&query, &var_meta, Some((&client, Path::new(""), None)))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FontSourceError::AxisNotAvailable { family, axis }
+                if family == "Roboto" && axis == "wdth"
+        ));
+    }
+
+    #[tokio::test]
+    async fn variable_css_requires_woff2_for_cdn_and_self_hosted() {
+        let mut family = test_family("");
+        family.variable = true;
+        let var_meta = FontSourceVariable {
+            family: family.family.clone(),
+            axes: HashMap::from([(
+                "wght".to_string(),
+                VariableAxis {
+                    default: 400.0,
+                    min: 100.0,
+                    max: 900.0,
+                    step: 1.0,
+                },
+            )]),
+        };
+        let query = QueryBuilder::new("Roboto")
+            .with_variable(true)
+            .with_file_type(FontFileType::Ttf)
+            .build();
+
+        let err = family
+            .to_variable_css(&query, &var_meta, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FontSourceError::FontVariantNotAvailable {
+                family,
+                field: "file_type",
+                requested_value
+            } if family == "Roboto" && requested_value == "ttf"
+        ));
+
+        let cache_root = tempfile::tempdir().unwrap();
+        let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
+        let err = family
+            .to_variable_css(&query, &var_meta, Some((&client, Path::new(""), None)))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FontSourceError::FontVariantNotAvailable {
+                family,
+                field: "file_type",
+                requested_value
+            } if family == "Roboto" && requested_value == "ttf"
+        ));
+
+        let query_with_woff2 = QueryBuilder::new("Roboto")
+            .with_variable(true)
+            .with_file_type(FontFileType::Ttf)
+            .with_file_type(FontFileType::Woff2)
+            .build();
+        let css = family
+            .to_variable_css(&query_with_woff2, &var_meta, None)
+            .await
+            .unwrap();
+        assert!(css.contains("format(\"woff2-variations\")"));
     }
 
     #[tokio::test]
@@ -979,7 +1151,15 @@ mod tests {
 
         let var_meta = FontSourceVariable {
             family: family.family.clone(),
-            axes: HashMap::new(),
+            axes: HashMap::from([(
+                "wght".to_string(),
+                VariableAxis {
+                    default: 400.0,
+                    min: 100.0,
+                    max: 900.0,
+                    step: 1.0,
+                },
+            )]),
         };
         let query = QueryBuilder::new("Roboto").with_variable(true).build();
         let cache_root = tempfile::tempdir().unwrap();
@@ -1001,7 +1181,15 @@ mod tests {
 
         let var_meta = FontSourceVariable {
             family: family.family.clone(),
-            axes: HashMap::new(),
+            axes: HashMap::from([(
+                "wght".to_string(),
+                VariableAxis {
+                    default: 400.0,
+                    min: 100.0,
+                    max: 900.0,
+                    step: 1.0,
+                },
+            )]),
         };
         let query = QueryBuilder::new("Roboto").with_variable(true).build();
         let cache_root = tempfile::tempdir().unwrap();
@@ -1015,12 +1203,12 @@ mod tests {
 
         let export_dir = cache_root.path().join("export");
         fs::create_dir_all(&export_dir).unwrap();
-        let destination = export_dir.join("latin-wght-normal.woff2");
+        let destination = export_dir.join("roboto").join("latin-wght-normal.woff2");
         let css = family
             .to_variable_css(
                 &query,
                 &var_meta,
-                Some((&client, Path::new("../"), Some(&destination))),
+                Some((&client, Path::new("../"), Some(&export_dir))),
             )
             .await
             .unwrap();
@@ -1031,6 +1219,13 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"cached variable font");
 
         let destination_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(
+            destination_dir
+                .path()
+                .join("roboto")
+                .join("latin-wght-normal.woff2"),
+        )
+        .unwrap();
         let err = family
             .to_variable_css(
                 &query,

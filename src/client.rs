@@ -166,8 +166,8 @@ impl FontSourceClient {
 
     /// Generate self-hosted CSS for the requested ``query``.
     ///
-    /// If ``dest`` path is given, the font files will be downloaded into the cache
-    /// (if necessary) and copied into the ``dest`` path.
+    /// If ``dest`` directory is given, the font files will be downloaded into the cache
+    /// (if necessary) and copied into a subdirectory named for the family ID.
     ///
     /// The returned CSS will use relative URLs appended to the given ``relative_url_prefix``.
     #[pyo3(
@@ -286,6 +286,8 @@ impl FontSourceClient {
         var_meta: &FontSourceVariable,
         query: &FontQuery,
     ) -> Result<Vec<PathBuf>> {
+        query.validate_variable_file_type()?;
+
         let mut subsets = query.filter_subsets(&family.subsets);
         if subsets.is_empty() {
             subsets.push(&family.default_subset);
@@ -298,20 +300,8 @@ impl FontSourceClient {
             filtered_styles.into_iter().map(|s| s.as_str()).collect()
         };
 
-        let axes: Vec<&str> = if query.axes().len() == 0 {
-            vec!["wght"]
-        } else {
-            query.axes().map(|a| a.as_str()).collect()
-        };
-
-        for axis in &axes {
-            if !var_meta.has_axis(axis) && *axis != "full" && *axis != "standard" {
-                return Err(FontSourceError::AxisNotAvailable {
-                    family: family.family.clone(),
-                    axis: (*axis).to_string(),
-                });
-            }
-        }
+        let axis = query.variable_resource_axis();
+        var_meta.validate_query_axes(&family.family, query)?;
 
         let family_cache_dir = self.family_cache_dir(&family.id);
         fs::create_dir_all(&family_cache_dir).map_err(|source| {
@@ -324,20 +314,18 @@ impl FontSourceClient {
         let mut download_tasks = JoinSet::new();
         for subset in &subsets {
             for style in &styles {
-                for axis in &axes {
-                    let file_name = format!("{subset}-{axis}-{style}.woff2");
-                    let font_path = family_cache_dir.join(&file_name);
-                    let font_url = format!(
-                        "https://cdn.jsdelivr.net/fontsource/fonts/{}:vf@latest/{file_name}",
-                        family.id
-                    );
-                    let client = self.clone();
-                    log::debug!("Downloading variable font file: {}/{file_name}", family.id);
-                    download_tasks.spawn(async move {
-                        client.download_font_file(&font_path, &font_url).await?;
-                        Ok(font_path)
-                    });
-                }
+                let file_name = format!("{subset}-{axis}-{style}.woff2");
+                let font_path = family_cache_dir.join(&file_name);
+                let font_url = format!(
+                    "https://cdn.jsdelivr.net/fontsource/fonts/{}:vf@latest/{file_name}",
+                    family.id
+                );
+                let client = self.clone();
+                log::debug!("Downloading variable font file: {}/{file_name}", family.id);
+                download_tasks.spawn(async move {
+                    client.download_font_file(&font_path, &font_url).await?;
+                    Ok(font_path)
+                });
             }
         }
 
@@ -647,11 +635,11 @@ impl FontSourceClient {
     }
 
     /// Generate self-hosted CSS for the given font `query`
-    /// and copy font files into `dest` path.
+    /// and copy font files into the `dest` directory.
     ///
     /// This ensures any missing files required for the requested variants are
     /// downloaded into the client's cache directory. The cached font files are then
-    /// copied to given `dest` path.
+    /// copied under `dest` in a subdirectory named for the family ID.
     ///
     /// When done, the returned string is the CSS `@font-face` rules where
     /// URLs are relative paths rooted in the given `dest` path. The copied font
@@ -1359,13 +1347,16 @@ mod tests {
 
         let family_cache = client.family_cache_dir("test-family");
         std::fs::create_dir_all(&family_cache).unwrap();
-        for axis in ["wght", "full", "standard"] {
-            std::fs::write(
-                family_cache.join(format!("latin-{axis}-normal.woff2")),
-                b"cached variable font",
-            )
-            .unwrap();
-        }
+        std::fs::write(
+            family_cache.join("latin-full-normal.woff2"),
+            b"cached variable font",
+        )
+        .unwrap();
+        std::fs::write(
+            family_cache.join("latin-wght-normal.woff2"),
+            b"cached variable font",
+        )
+        .unwrap();
 
         let query = QueryBuilder::new("Test Family")
             .with_variable(true)
@@ -1375,14 +1366,7 @@ mod tests {
             .build();
         let paths = client.download_font(&query).await.unwrap();
 
-        assert_eq!(paths.len(), 3);
-        assert!(paths.iter().all(|path| path.exists()));
-        assert!(paths.iter().all(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .ends_with("-normal.woff2")
-        }));
+        assert_eq!(paths, vec![family_cache.join("latin-full-normal.woff2")]);
 
         let matching_variant = QueryBuilder::new("Test Family")
             .with_variable(true)
@@ -1394,14 +1378,6 @@ mod tests {
         std::fs::write(&matching_path, b"cached variable font").unwrap();
         let paths = client.download_font(&matching_variant).await.unwrap();
         assert_eq!(paths, vec![matching_path]);
-
-        let family: FontSourceFamily =
-            serde_json::from_str(variable_family_metadata_json()).unwrap();
-        let paths = client
-            .download_variable_font(&family, &variable_metadata.variable, &FontQuery::default())
-            .await
-            .unwrap();
-        assert_eq!(paths, vec![family_cache.join("latin-wght-normal.woff2")]);
     }
 
     #[tokio::test]
@@ -1449,6 +1425,72 @@ mod tests {
             FontSourceError::AxisNotAvailable { family, axis }
                 if family == "Test Family" && axis == "wdth"
         ));
+    }
+
+    #[tokio::test]
+    async fn variable_download_requires_woff2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = FontSourceClient::with_cache_root(tmp.path()).unwrap();
+        let family: FontSourceFamily =
+            serde_json::from_str(variable_family_metadata_json()).unwrap();
+        let var_meta = FontSourceVariable {
+            family: family.family.clone(),
+            axes: HashMap::new(),
+        };
+        let query = QueryBuilder::new("Test Family")
+            .with_variable(true)
+            .with_file_type(FontFileType::Ttf)
+            .build();
+
+        let err = client
+            .download_variable_font(&family, &var_meta, &query)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FontSourceError::FontVariantNotAvailable {
+                family,
+                field: "file_type",
+                requested_value
+            } if family == "Test Family" && requested_value == "ttf"
+        ));
+    }
+
+    #[tokio::test]
+    async fn variable_download_accepts_mixed_case_metadata_axis() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = FontSourceClient::with_cache_root(tmp.path()).unwrap();
+        let family: FontSourceFamily =
+            serde_json::from_str(variable_family_metadata_json()).unwrap();
+        let var_meta = FontSourceVariable {
+            family: family.family.clone(),
+            axes: HashMap::from([(
+                "GRAD".to_string(),
+                crate::responses::VariableAxis {
+                    default: 0.0,
+                    min: -200.0,
+                    max: 150.0,
+                    step: 1.0,
+                },
+            )]),
+        };
+        let query = QueryBuilder::new("Test Family")
+            .with_variable(true)
+            .with_axis("GRAD")
+            .build();
+        let cached_path = client
+            .family_cache_dir(&family.id)
+            .join("latin-grad-normal.woff2");
+        std::fs::create_dir_all(cached_path.parent().unwrap()).unwrap();
+        std::fs::write(&cached_path, b"cached variable font").unwrap();
+
+        assert_eq!(query.axes().next().map(String::as_str), Some("grad"));
+        let paths = client
+            .download_variable_font(&family, &var_meta, &query)
+            .await
+            .unwrap();
+        assert_eq!(paths, vec![cached_path]);
     }
 
     #[tokio::test]

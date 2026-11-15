@@ -1,5 +1,7 @@
 use std::collections::{HashSet, hash_set::Iter};
 
+use crate::error::{FontSourceError, Result};
+
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -208,6 +210,9 @@ impl QueryBuilder {
     }
 
     /// Add multiple targeted variable font axes.
+    ///
+    /// Multiple standard axes use Fontsource's `"standard"` resource; combinations that
+    /// include custom axes use its `"full"` resource.
     pub fn with_axes<I, S>(self, axes: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -310,6 +315,42 @@ impl FontQuery {
     /// An iterator over the targeted variable axes in this query.
     pub fn axes(&self) -> Iter<'_, String> {
         self.axes.iter()
+    }
+
+    pub(crate) fn variable_resource_axis(&self) -> String {
+        let mut axes = self.axes.iter();
+        let Some(axis) = axes.next() else {
+            return "wght".to_string();
+        };
+        if axes.next().is_none() {
+            return axis.clone();
+        }
+        if self.axes.contains("full")
+            || self.axes.iter().any(|axis| {
+                !matches!(
+                    axis.as_str(),
+                    "standard" | "wght" | "wdth" | "slnt" | "opsz" | "ital"
+                )
+            })
+        {
+            return "full".to_string();
+        }
+        "standard".to_string()
+    }
+
+    pub(crate) fn validate_variable_file_type(&self) -> Result<()> {
+        if self.file_type.contains(&FontFileType::Woff2) {
+            return Ok(());
+        }
+        Err(FontSourceError::FontVariantNotAvailable {
+            family: self.family.clone(),
+            field: "file_type",
+            requested_value: self
+                .file_types()
+                .map(FontFileType::extension)
+                .collect::<Vec<&str>>()
+                .join(","),
+        })
     }
 
     pub(crate) fn filter_subsets<'a>(&'a self, available: &[String]) -> Vec<&'a String> {
@@ -685,5 +726,35 @@ mod tests {
             default_var.file_types().collect::<Vec<&FontFileType>>(),
             vec![&FontFileType::Woff2]
         );
+    }
+
+    #[test]
+    fn variable_resource_axis_selection() {
+        let query = FontQuery::default();
+        assert_eq!(query.variable_resource_axis(), "wght");
+
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axis("wdth")
+            .build();
+        assert_eq!(query.variable_resource_axis(), "wdth");
+
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "wdth", "ital"])
+            .build();
+        assert_eq!(query.variable_resource_axis(), "standard");
+
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "GRAD"])
+            .build();
+        assert_eq!(query.variable_resource_axis(), "full");
+
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "standard"])
+            .build();
+        assert_eq!(query.variable_resource_axis(), "standard");
     }
 }
