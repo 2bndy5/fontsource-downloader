@@ -1,0 +1,17 @@
+{
+  "family": "Inter",
+  "axes": {
+    "wght": {
+      "default": 400,
+      "min": 100,
+      "max": 900,
+      "step": 1
+    },
+    "slnt": {
+      "default": 0,
+      "min": -10,
+      "max": 0,
+      "step": 1
+    }
+  }
+}

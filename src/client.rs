@@ -13,17 +13,19 @@ use std::{
 use crate::{
     caching::{
         CACHE_LOCK_EXT, DEFAULT_METADATA_TTL, FAMILY_CACHE_FILE, FamilyCacheInfo,
-        FontListCacheInfo, default_cache_root, expires_at, now_unix, open_lock_file, parse_max_age,
+        FontListCacheInfo, VariableCacheInfo, default_cache_root, expires_at, now_unix,
+        open_lock_file, parse_max_age,
     },
     error::{FontSourceError, Result},
     query::FontQuery,
-    responses::FontSourceFamily,
+    responses::{FontSourceFamily, FontSourceVariable},
 };
 
 #[cfg(not(test))]
 const FONTSOURCE_API: &str = "https://api.fontsource.org/";
 
 const FONTSOURCE_FONT_URL_PATH: &str = "v1/fonts/";
+const FONTSOURCE_VARIABLE_URL_PATH: &str = "v1/variable/";
 const FONTSOURCE_FONT_LIST_PATH: &str = "fontlist?family";
 
 /// A client for downloading (and caching) font files from Fontsource.
@@ -116,6 +118,39 @@ impl FontSourceClient {
         self.family_cache_info(id).map_err(PyErr::from)
     }
 
+    /// Get the cache info for the specified font family's variable font axes.
+    ///
+    /// Returns an error if
+    ///
+    /// - the cache was not previously populated
+    /// - the cached JSON file was modified by external actors in a
+    ///   way that causes deserialization errors.
+    #[pyo3(
+        name = "variable_cache_info",
+        text_signature = "(id: str) -> VariableCacheInfo",
+        signature = (id),
+    )]
+    pub fn variable_cache_info_py(&self, id: &str) -> PyResult<VariableCacheInfo> {
+        self.variable_cache_info(id).map_err(PyErr::from)
+    }
+
+    /// Asynchronously fetch the variable font axes metadata for the given font family.
+    #[pyo3(
+        name = "variable_metadata",
+        text_signature = "(family: str) -> FontSourceVariable",
+        signature = (family),
+    )]
+    pub fn variable_metadata_py<'py>(
+        &self,
+        py: Python<'py>,
+        family: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let this = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            this.variable_metadata(&family).await.map_err(PyErr::from)
+        })
+    }
+
     /// Generate CDN-based CSS for the requested `FontQuery` and return it as a string.
     #[pyo3(
         name = "css",
@@ -195,6 +230,15 @@ impl FontSourceClient {
     /// [`FontSourceClient::with_cache_root()`] constructor.
     pub async fn download_font(&self, query: &FontQuery) -> Result<Vec<PathBuf>> {
         let family = self.load_family_metadata(query.family()).await?;
+        if query.is_variable() {
+            if !family.is_variable() {
+                return Err(FontSourceError::VariableFontNotSupported {
+                    family: query.family().to_string(),
+                });
+            }
+            let var_meta = self.load_variable_metadata(query.family()).await?;
+            return self.download_variable_font(&family, &var_meta, query).await;
+        }
         let subsets = family.get_variant_subsets(query)?;
 
         let family_cache_dir = self.family_cache_dir(&family.id);
@@ -234,6 +278,74 @@ impl FontSourceClient {
         }
         Self::collect_concurrent_tasks(&mut download_tasks, "downloading requested font files")
             .await
+    }
+
+    async fn download_variable_font(
+        &self,
+        family: &FontSourceFamily,
+        var_meta: &FontSourceVariable,
+        query: &FontQuery,
+    ) -> Result<Vec<PathBuf>> {
+        let mut subsets = query.filter_subsets(&family.subsets);
+        if subsets.is_empty() {
+            subsets.push(&family.default_subset);
+        }
+
+        let filtered_styles = query.filter_styles(&family.styles);
+        let styles: Vec<&str> = if filtered_styles.is_empty() {
+            vec!["normal"]
+        } else {
+            filtered_styles.into_iter().map(|s| s.as_str()).collect()
+        };
+
+        let axes: Vec<&str> = if query.axes().len() == 0 {
+            vec!["wght"]
+        } else {
+            query.axes().map(|a| a.as_str()).collect()
+        };
+
+        for axis in &axes {
+            if !var_meta.has_axis(axis) && *axis != "full" && *axis != "standard" {
+                return Err(FontSourceError::AxisNotAvailable {
+                    family: family.family.clone(),
+                    axis: (*axis).to_string(),
+                });
+            }
+        }
+
+        let family_cache_dir = self.family_cache_dir(&family.id);
+        fs::create_dir_all(&family_cache_dir).map_err(|source| {
+            FontSourceError::CreateFontCacheDirFailed {
+                path: family_cache_dir.display().to_string(),
+                source,
+            }
+        })?;
+
+        let mut download_tasks = JoinSet::new();
+        for subset in &subsets {
+            for style in &styles {
+                for axis in &axes {
+                    let file_name = format!("{subset}-{axis}-{style}.woff2");
+                    let font_path = family_cache_dir.join(&file_name);
+                    let font_url = format!(
+                        "https://cdn.jsdelivr.net/fontsource/fonts/{}:vf@latest/{file_name}",
+                        family.id
+                    );
+                    let client = self.clone();
+                    log::debug!("Downloading variable font file: {}/{file_name}", family.id);
+                    download_tasks.spawn(async move {
+                        client.download_font_file(&font_path, &font_url).await?;
+                        Ok(font_path)
+                    });
+                }
+            }
+        }
+
+        Self::collect_concurrent_tasks(
+            &mut download_tasks,
+            "downloading requested variable font files",
+        )
+        .await
     }
 
     pub(crate) async fn collect_concurrent_tasks<T: 'static>(
@@ -367,6 +479,90 @@ impl FontSourceClient {
         Ok(cache_payload.family)
     }
 
+    /// Asynchronously fetch the variable font axes metadata for the given font family.
+    ///
+    /// Accepts a font family display name (e.g. "Inter") or a family name recognized by Fontsource.
+    ///
+    /// Returns a [`FontSourceError`] if the family is not found, does not support variable fonts,
+    /// or if the request fails.
+    pub async fn variable_metadata(&self, family: &str) -> Result<FontSourceVariable> {
+        self.load_variable_metadata(family).await
+    }
+
+    /// Load the variable font axes metadata for a given font family and return it.
+    async fn load_variable_metadata(&self, family: &str) -> Result<FontSourceVariable> {
+        let family_metadata = self.load_family_metadata(family).await?;
+        if !family_metadata.is_variable() {
+            return Err(FontSourceError::VariableFontNotSupported {
+                family: family.trim().to_string(),
+            });
+        }
+        let fam_id = &family_metadata.id;
+
+        if let Some(cached) = self
+            .variable_cache_info(fam_id)
+            .ok()
+            .filter(|cached| cached.expiration > now_unix())
+        {
+            return Ok(cached.variable);
+        }
+
+        #[cfg(not(test))]
+        let variable_url = format!("{FONTSOURCE_API}{FONTSOURCE_VARIABLE_URL_PATH}{fam_id}");
+        #[cfg(test)]
+        #[allow(clippy::unwrap_used, reason = "tests should panic on missing env var")]
+        let variable_url = format!(
+            "{}{FONTSOURCE_VARIABLE_URL_PATH}{fam_id}",
+            std::env::var("FONTSOURCE_API").unwrap()
+        );
+
+        let detail_response = self
+            .client
+            .get(&variable_url)
+            .send()
+            .await
+            .map_err(|source| FontSourceError::MetadataRequestFailed {
+                request: format!("getting variable axes metadata about the font {family}"),
+                source,
+            })?
+            .error_for_status()
+            .map_err(|source| FontSourceError::MetadataRequestFailed {
+                request: format!("getting variable axes metadata about the font {family}"),
+                source,
+            })?;
+        let ttl = parse_max_age(
+            detail_response
+                .headers()
+                .get(reqwest::header::CACHE_CONTROL),
+        )
+        .unwrap_or(DEFAULT_METADATA_TTL);
+        let metadata: FontSourceVariable = serde_json::from_str(
+            detail_response
+                .text()
+                .await
+                .map_err(|source| FontSourceError::MetadataDecodeFailed {
+                    request: format!(
+                        "getting variable axes metadata about the font family {family}"
+                    ),
+                    source,
+                })?
+                .as_str(),
+        )
+        .map_err(|e| FontSourceError::ParseResponseFailed {
+            task: "getting font variable metadata",
+            source: e,
+        })?;
+
+        let cache_payload = VariableCacheInfo {
+            expiration: expires_at(ttl),
+            variable: metadata,
+        };
+        let variable_cache_path = self.variable_cache_path(fam_id);
+        self.write_cache_json_locked(&variable_cache_path, &cache_payload)?;
+
+        Ok(cache_payload.variable)
+    }
+
     /// Load the list of font families and return the ID corresponding to the given `family` name.
     async fn load_font_list_families(&self, family: &str) -> Result<Option<String>> {
         if let Some(cached) = self
@@ -436,6 +632,10 @@ impl FontSourceClient {
     /// from the site's static resources.
     pub async fn css(&self, query: &FontQuery) -> Result<String> {
         let family = self.load_family_metadata(query.family()).await?;
+        if query.is_variable() {
+            let var_meta = self.load_variable_metadata(query.family()).await?;
+            return family.to_variable_css(query, &var_meta, None).await;
+        }
         family.to_css(query, None).await
     }
 
@@ -464,6 +664,16 @@ impl FontSourceClient {
         dest: Option<&Path>,
     ) -> Result<String> {
         let family = self.load_family_metadata(query.family()).await?;
+        if query.is_variable() {
+            let var_meta = self.load_variable_metadata(query.family()).await?;
+            return family
+                .to_variable_css(
+                    query,
+                    &var_meta,
+                    Some((self, Path::new(relative_url_prefix), dest)),
+                )
+                .await;
+        }
         family
             .to_css(query, Some((self, Path::new(relative_url_prefix), dest)))
             .await

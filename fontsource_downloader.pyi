@@ -9,6 +9,8 @@ class FontSourceClient:
     def families_cache_path(self) -> Path: ...
     def font_list_cache_info(self) -> FontListCacheInfo: ...
     def family_cache_info(self, family: str) -> FamilyCacheInfo: ...
+    def variable_cache_info(self, id: str) -> VariableCacheInfo: ...
+    async def variable_metadata(self, family: str) -> FontSourceVariable: ...
 
 class Weight(IntEnum):
     Thin = 100
@@ -37,6 +39,9 @@ class FontQuery(NamedTuple):
     weights: list[Weight] | None = ...
     subsets: list[str] | None = ...
     file_types: list[FontFileType] | None = ...
+    variable: bool = ...
+    append_variable_suffix: bool = ...
+    axes: list[str] | None = ...
 
 @dataclass(frozen=True)
 class FontListCacheInfo:
@@ -51,6 +56,11 @@ class FamilyCacheInfo:
     family: FontSourceFamily
 
 @dataclass(frozen=True)
+class VariableCacheInfo:
+    expiration: int
+    variable: FontSourceVariable
+
+@dataclass(frozen=True)
 class FontSourceFamily:
     id: str
     family: str
@@ -58,3 +68,23 @@ class FontSourceFamily:
     weights: list[int]
     styles: list[str]
     default_subset: str
+    variable: bool
+
+    def is_variable(self) -> bool: ...
+
+@dataclass(frozen=True)
+class VariableAxis:
+    default: float
+    min: float
+    max: float
+    step: float
+
+@dataclass(frozen=True)
+class FontSourceVariable:
+    family: str
+    axes: dict[str, VariableAxis]
+
+    def has_axis(self, tag: str) -> bool: ...
+    def get_axis(self, tag: str) -> VariableAxis | None: ...
+    def weight_range(self) -> tuple[float, float] | None: ...
+    def slant_range(self) -> tuple[float, float] | None: ...

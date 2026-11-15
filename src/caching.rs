@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     client::FontSourceClient,
     error::{FontSourceError, Result},
-    responses::FontSourceFamily,
+    responses::{FontSourceFamily, FontSourceVariable},
 };
 
 pub(crate) const DEFAULT_METADATA_TTL: Duration = Duration::from_hours(24);
 const FONT_LIST_CACHE_FILE: &str = "fontsource-family-list-cache.json";
 pub(crate) const FAMILY_CACHE_FILE: &str = "family-metadata-cache.json";
+pub(crate) const VARIABLE_CACHE_FILE: &str = "variable-metadata-cache.json";
 pub(crate) const CACHE_LOCK_EXT: &str = "lock";
 
 /// The cached list of font families.
@@ -67,6 +68,20 @@ pub struct FamilyCacheInfo {
     pub family: FontSourceFamily,
 }
 
+/// The cached metadata for a font family's variable font axes.
+#[cfg_attr(
+    feature = "pyo3",
+    pyclass(module = "fontsource_downloader", get_all, frozen)
+)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VariableCacheInfo {
+    /// The Unix timestamp (in seconds) when this cache entry expires.
+    #[serde(alias = "expires_at_unix")]
+    pub expiration: u64,
+    /// The variable font metadata for the font family.
+    pub variable: FontSourceVariable,
+}
+
 impl FontSourceClient {
     /// Get the path to the cache directory for font families.
     ///
@@ -78,6 +93,11 @@ impl FontSourceClient {
     /// Get the path to the cache directory for a specific font family.
     pub(crate) fn family_cache_dir(&self, family_id: &str) -> PathBuf {
         self.families_cache_path().join(family_id)
+    }
+
+    /// Get the path to the cache file for a specific font family's variable font metadata.
+    pub(crate) fn variable_cache_path(&self, family_id: &str) -> PathBuf {
+        self.family_cache_dir(family_id).join(VARIABLE_CACHE_FILE)
     }
 
     /// Get the path to the cache file for the list of font families.
@@ -115,6 +135,25 @@ impl FontSourceClient {
     ///   way that causes deserialization errors.
     pub fn family_cache_info(&self, family_id: &str) -> Result<FamilyCacheInfo> {
         let cache_path = self.family_cache_dir(family_id).join(FAMILY_CACHE_FILE);
+        let raw = fs::read_to_string(&cache_path).map_err(|source| {
+            FontSourceError::ReadCacheFileFailed {
+                path: cache_path,
+                source,
+            }
+        })?;
+        let cache = serde_json::from_str(&raw)?;
+        Ok(cache)
+    }
+
+    /// Get the cached variable font metadata for a specific font family.
+    ///
+    /// Returns an error if
+    ///
+    /// - the cache was not previously populated with variable metadata
+    /// - the cached JSON file was modified by external actors in a
+    ///   way that causes deserialization errors.
+    pub fn variable_cache_info(&self, family_id: &str) -> Result<VariableCacheInfo> {
+        let cache_path = self.variable_cache_path(family_id);
         let raw = fs::read_to_string(&cache_path).map_err(|source| {
             FontSourceError::ReadCacheFileFailed {
                 path: cache_path,
@@ -391,5 +430,34 @@ mod tests {
             client.family_cache_dir("test-family"),
             temp_dir.path().join("families").join("test-family")
         );
+        assert_eq!(
+            client.variable_cache_path("test-family"),
+            temp_dir
+                .path()
+                .join("families")
+                .join("test-family")
+                .join(VARIABLE_CACHE_FILE)
+        );
+    }
+
+    #[test]
+    fn variable_cache_info_reads_written_cache() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client = test_client(temp_dir.path());
+        let var_cache_path = client.variable_cache_path("inter");
+        let cache = VariableCacheInfo {
+            expiration: 123456789,
+            variable: FontSourceVariable {
+                family: "Inter".to_string(),
+                axes: HashMap::new(),
+            },
+        };
+
+        client
+            .write_cache_json_locked(&var_cache_path, &cache)
+            .unwrap();
+        let loaded = client.variable_cache_info("inter").unwrap();
+        assert_eq!(loaded.expiration, 123456789);
+        assert_eq!(loaded.variable.family, "Inter");
     }
 }

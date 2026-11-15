@@ -74,8 +74,14 @@ pub struct FontSourceFamily {
     pub(crate) unicode_range: HashMap<String, String>,
 
     /// Whether this font family supports variable fonts.
+    #[cfg(feature = "pyo3")]
+    #[pyo3(get)]
     #[serde(default)]
-    pub(crate) variable: bool,
+    pub variable: bool,
+    /// Whether this font family supports variable fonts.
+    #[cfg(not(feature = "pyo3"))]
+    #[serde(default)]
+    pub variable: bool,
 
     /// The mapping of font variants (weight, style, subset) to their corresponding URLs.
     #[serde(default)]
@@ -83,6 +89,10 @@ pub struct FontSourceFamily {
 }
 
 impl FontSourceFamily {
+    /// Returns whether this font family supports variable fonts.
+    pub fn is_variable(&self) -> bool {
+        self.variable
+    }
     /// Returns a map of (weight, style, subset) to `FontSourceVariantSubset` for the variants matching the query.
     pub(crate) fn get_variant_subsets<'a>(
         &'a self,
@@ -232,6 +242,318 @@ impl FontSourceFamily {
         .await?;
 
         Ok(result)
+    }
+
+    /// Synthesize `@font-face` CSS for a variable font `query` using variable axes metadata.
+    pub(crate) async fn to_variable_css(
+        &self,
+        query: &FontQuery,
+        var_meta: &FontSourceVariable,
+        client_dest: Option<(&FontSourceClient, &Path, Option<&Path>)>,
+    ) -> Result<String> {
+        if !self.is_variable() {
+            return Err(FontSourceError::VariableFontNotSupported {
+                family: self.family.clone(),
+            });
+        }
+
+        let mut result = String::new();
+        let mut download_tasks = JoinSet::new();
+
+        let mut subsets = query.filter_subsets(&self.subsets);
+        if subsets.is_empty() {
+            subsets.push(&self.default_subset);
+        }
+
+        let filtered_styles = query.filter_styles(&self.styles);
+        let styles: Vec<&str> = if filtered_styles.is_empty() {
+            vec!["normal"]
+        } else {
+            filtered_styles.into_iter().map(|s| s.as_str()).collect()
+        };
+
+        let axes: Vec<&str> = if query.axes().len() == 0 {
+            vec!["wght"]
+        } else {
+            query.axes().map(|a| a.as_str()).collect()
+        };
+
+        let family_name = if query.append_variable_suffix()
+            && !self.family.to_lowercase().ends_with(" variable")
+        {
+            format!("{} Variable", self.family)
+        } else {
+            self.family.clone()
+        };
+
+        let weight_css = if let Some((min_w, max_w)) = var_meta.weight_range() {
+            if (min_w - max_w).abs() < f64::EPSILON {
+                format!("{min_w:.0}")
+            } else {
+                format!("{min_w:.0} {max_w:.0}")
+            }
+        } else {
+            let weights = query.filter_weights(&self.weights);
+            if weights.is_empty() {
+                "400".to_string()
+            } else {
+                weights
+                    .iter()
+                    .map(|w| w.to_string())
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            }
+        };
+
+        let client_dest = client_dest.map(|(c, p, d)| (c, p.join(&self.id), d));
+
+        for subset in &subsets {
+            for style in &styles {
+                let style_css = if *style == "oblique"
+                    && let Some((min_s, max_s)) = var_meta.slant_range()
+                {
+                    if (min_s - max_s).abs() < f64::EPSILON {
+                        format!("oblique {min_s:.0}deg")
+                    } else {
+                        format!("oblique {min_s:.0}deg {max_s:.0}deg")
+                    }
+                } else {
+                    style.to_string()
+                };
+
+                for axis in &axes {
+                    let file_name = format!("{subset}-{axis}-{style}.woff2");
+                    let cdn_url = format!(
+                        "https://cdn.jsdelivr.net/fontsource/fonts/{}:vf@latest/{file_name}",
+                        self.id
+                    );
+
+                    let src_entry = if let Some((client, rel_prefix, dest)) = &client_dest {
+                        if let Some(dest) = dest {
+                            let family_cache_root = client.family_cache_dir(&self.id);
+                            let font_path = family_cache_root.join(&file_name);
+                            let dest = dest.to_path_buf();
+                            let client = (*client).to_owned();
+                            let font_url = cdn_url.clone();
+                            log::debug!("Downloading variable font file: {}/{file_name}", self.id);
+                            download_tasks.spawn(async move {
+                                client.download_font_file(&font_path, &font_url).await?;
+                                fs::copy(&font_path, &dest).map_err(|source| {
+                                    FontSourceError::WriteFileFailed {
+                                        path: dest.to_string_lossy().to_string(),
+                                        source,
+                                    }
+                                })?;
+                                Ok(())
+                            });
+                        }
+                        let full_path = rel_prefix.join(&file_name);
+                        format!(
+                            r#"url("{}") format("woff2-variations")"#,
+                            full_path.to_string_lossy().replace('\\', "/")
+                        )
+                    } else {
+                        format!(r#"url("{cdn_url}") format("woff2-variations")"#)
+                    };
+
+                    let mut css = format!(
+                        r#"
+@font-face {{
+  font-family: '{family_name}';
+  font-style: {style_css};
+  font-weight: {weight_css};
+  src:
+    {src_entry};"#
+                    );
+                    if let Some(range) = self.unicode_range.get(*subset) {
+                        css.push_str(&format!("\n  unicode-range: {range};"));
+                    }
+                    css.push_str("\n}\n");
+                    result.push_str(&css);
+                }
+            }
+        }
+
+        FontSourceClient::collect_concurrent_tasks(
+            &mut download_tasks,
+            "downloading and copying self-hosted variable font files",
+        )
+        .await?;
+
+        Ok(result)
+    }
+}
+
+fn deserialize_f64_or_string<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct F64OrStringVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for F64OrStringVisitor {
+        type Value = f64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a float or string representing a float")
+        }
+
+        fn visit_i64<E>(self, value: i64) -> std::result::Result<f64, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value as f64)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> std::result::Result<f64, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value as f64)
+        }
+
+        fn visit_f64<E>(self, value: f64) -> std::result::Result<f64, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_str<E>(self, value: &str) -> std::result::Result<f64, E>
+        where
+            E: serde::de::Error,
+        {
+            value
+                .trim()
+                .parse::<f64>()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_any(F64OrStringVisitor)
+}
+
+/// The metric parameters for a variable font axis.
+#[cfg_attr(
+    feature = "pyo3",
+    pyclass(module = "fontsource_downloader", frozen, from_py_object)
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VariableAxis {
+    /// The default value for this axis.
+    #[cfg(feature = "pyo3")]
+    #[pyo3(get)]
+    #[serde(deserialize_with = "deserialize_f64_or_string")]
+    pub default: f64,
+    /// The default value for this axis.
+    #[cfg(not(feature = "pyo3"))]
+    #[serde(deserialize_with = "deserialize_f64_or_string")]
+    pub default: f64,
+
+    /// The minimum permitted value for this axis.
+    #[cfg(feature = "pyo3")]
+    #[pyo3(get)]
+    #[serde(deserialize_with = "deserialize_f64_or_string")]
+    pub min: f64,
+    /// The minimum permitted value for this axis.
+    #[cfg(not(feature = "pyo3"))]
+    #[serde(deserialize_with = "deserialize_f64_or_string")]
+    pub min: f64,
+
+    /// The maximum permitted value for this axis.
+    #[cfg(feature = "pyo3")]
+    #[pyo3(get)]
+    #[serde(deserialize_with = "deserialize_f64_or_string")]
+    pub max: f64,
+    /// The maximum permitted value for this axis.
+    #[cfg(not(feature = "pyo3"))]
+    #[serde(deserialize_with = "deserialize_f64_or_string")]
+    pub max: f64,
+
+    /// The incremental step size recommended for this axis.
+    #[cfg(feature = "pyo3")]
+    #[pyo3(get)]
+    #[serde(deserialize_with = "deserialize_f64_or_string")]
+    pub step: f64,
+    /// The incremental step size recommended for this axis.
+    #[cfg(not(feature = "pyo3"))]
+    #[serde(deserialize_with = "deserialize_f64_or_string")]
+    pub step: f64,
+}
+
+#[cfg(feature = "pyo3")]
+#[pymethods]
+impl VariableAxis {
+    /// Create a new `VariableAxis`.
+    #[new]
+    #[pyo3(
+        signature = (default, min, max, step),
+        text_signature = "(default: float, min: float, max: float, step: float) -> VariableAxis"
+    )]
+    pub fn new(default: f64, min: f64, max: f64, step: f64) -> Self {
+        Self {
+            default,
+            min,
+            max,
+            step,
+        }
+    }
+}
+
+/// The variable font metadata and axes for a font family.
+#[cfg_attr(
+    feature = "pyo3",
+    pyclass(module = "fontsource_downloader", frozen, from_py_object)
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FontSourceVariable {
+    /// The display name of the font family.
+    #[cfg(feature = "pyo3")]
+    #[pyo3(get)]
+    pub family: String,
+    /// The display name of the font family.
+    #[cfg(not(feature = "pyo3"))]
+    pub family: String,
+
+    /// A map of variable font axis tags (e.g. "wght", "slnt", "wdth") to their metric constraints.
+    #[cfg(feature = "pyo3")]
+    #[pyo3(get)]
+    pub axes: HashMap<String, VariableAxis>,
+    /// A map of variable font axis tags (e.g. "wght", "slnt", "wdth") to their metric constraints.
+    #[cfg(not(feature = "pyo3"))]
+    pub axes: HashMap<String, VariableAxis>,
+}
+
+#[cfg_attr(feature = "pyo3", pymethods)]
+impl FontSourceVariable {
+    /// Create a new `FontSourceVariable`.
+    #[cfg(feature = "pyo3")]
+    #[new]
+    #[pyo3(
+        signature = (family, axes),
+        text_signature = "(family: str, axes: dict[str, VariableAxis]) -> FontSourceVariable"
+    )]
+    pub fn new_py(family: String, axes: HashMap<String, VariableAxis>) -> Self {
+        Self { family, axes }
+    }
+
+    /// Check whether a specific axis tag (e.g. "wght", "slnt", "wdth", "opsz") is available.
+    pub fn has_axis(&self, tag: &str) -> bool {
+        self.axes.contains_key(tag)
+    }
+
+    /// Get the axis metadata for a given tag.
+    pub fn get_axis(&self, tag: &str) -> Option<VariableAxis> {
+        self.axes.get(tag).cloned()
+    }
+
+    /// Get the weight range `(min, max)` if the "wght" axis is supported.
+    pub fn weight_range(&self) -> Option<(f64, f64)> {
+        self.axes.get("wght").map(|axis| (axis.min, axis.max))
+    }
+
+    /// Get the slant range `(min, max)` if the "slnt" axis is supported.
+    pub fn slant_range(&self) -> Option<(f64, f64)> {
+        self.axes.get("slnt").map(|axis| (axis.min, axis.max))
     }
 }
 
@@ -430,5 +752,132 @@ mod tests {
             matches!(err, FontSourceError::WriteFileFailed { .. }),
             "expected WriteFileFailed, got {err:?}"
         );
+    }
+
+    #[test]
+    fn deserialize_variable_axes_numbers_and_strings() {
+        let json_with_strings = r#"{
+            "family": "Inter",
+            "axes": {
+                "slnt": { "default": "0", "min": "-10", "max": "0", "step": "1" },
+                "wght": { "default": 400, "min": 100, "max": 900, "step": 1 }
+            }
+        }"#;
+
+        let parsed: FontSourceVariable = serde_json::from_str(json_with_strings).unwrap();
+        assert_eq!(parsed.family, "Inter");
+        assert!(parsed.has_axis("wght"));
+        assert!(parsed.has_axis("slnt"));
+        assert!(!parsed.has_axis("wdth"));
+
+        assert_eq!(parsed.weight_range(), Some((100.0, 900.0)));
+        assert_eq!(parsed.slant_range(), Some((-10.0, 0.0)));
+
+        let wght = parsed.get_axis("wght").unwrap();
+        assert_eq!(wght.default, 400.0);
+        assert_eq!(wght.min, 100.0);
+        assert_eq!(wght.max, 900.0);
+        assert_eq!(wght.step, 1.0);
+    }
+
+    #[tokio::test]
+    async fn variable_css_generation() {
+        let mut unicode_range = HashMap::new();
+        unicode_range.insert("latin".to_string(), "U+0000-00FF".to_string());
+
+        let family = FontSourceFamily {
+            id: "inter".to_string(),
+            family: "Inter".to_string(),
+            subsets: vec!["latin".to_string()],
+            weights: vec![400],
+            styles: vec!["normal".to_string(), "oblique".to_string()],
+            default_subset: "latin".to_string(),
+            unicode_range,
+            variable: true,
+            variants: FontSourceVariants::default(),
+        };
+
+        let mut axes = HashMap::new();
+        axes.insert(
+            "wght".to_string(),
+            VariableAxis {
+                default: 400.0,
+                min: 100.0,
+                max: 900.0,
+                step: 1.0,
+            },
+        );
+        axes.insert(
+            "slnt".to_string(),
+            VariableAxis {
+                default: 0.0,
+                min: -10.0,
+                max: 0.0,
+                step: 1.0,
+            },
+        );
+        let var_meta = FontSourceVariable {
+            family: "Inter".to_string(),
+            axes,
+        };
+
+        // 1. Basic CDN variable CSS without suffix
+        let query_basic = QueryBuilder::new("Inter").with_variable(true).build();
+        let css_basic = family
+            .to_variable_css(&query_basic, &var_meta, None)
+            .await
+            .unwrap();
+
+        assert!(css_basic.contains("font-family: 'Inter';"));
+        assert!(css_basic.contains("font-weight: 100 900;"));
+        assert!(css_basic.contains("font-style: normal;"));
+        assert!(css_basic.contains(
+            r#"url("https://cdn.jsdelivr.net/fontsource/fonts/inter:vf@latest/latin-wght-normal.woff2") format("woff2-variations")"#
+        ));
+        assert!(css_basic.contains("unicode-range: U+0000-00FF;"));
+
+        // 2. Opt-in suffix appends " Variable"
+        let query_suffix = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_variable_suffix(true)
+            .build();
+        let css_suffix = family
+            .to_variable_css(&query_suffix, &var_meta, None)
+            .await
+            .unwrap();
+        assert!(css_suffix.contains("font-family: 'Inter Variable';"));
+
+        // If family already has "Variable", it doesn't double-append
+        let mut fam_with_var = family.clone();
+        fam_with_var.family = "Inter Variable".to_string();
+        let css_no_double = fam_with_var
+            .to_variable_css(&query_suffix, &var_meta, None)
+            .await
+            .unwrap();
+        assert!(css_no_double.contains("font-family: 'Inter Variable';"));
+        assert!(!css_no_double.contains("Variable Variable"));
+
+        // 3. Oblique style with slant range
+        let query_oblique = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_style("oblique")
+            .build();
+        let css_oblique = family
+            .to_variable_css(&query_oblique, &var_meta, None)
+            .await
+            .unwrap();
+        assert!(css_oblique.contains("font-style: oblique -10deg 0deg;"));
+
+        // 4. Non-variable font family errors
+        let mut non_var_family = family.clone();
+        non_var_family.variable = false;
+        let err = non_var_family
+            .to_variable_css(&query_basic, &var_meta, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FontSourceError::VariableFontNotSupported { .. }
+        ));
     }
 }

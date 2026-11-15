@@ -53,6 +53,22 @@ pub enum FontSourceError {
         requested_value: String,
     },
 
+    /// Error when a variable font is requested for a family that does not support variable fonts.
+    #[error("Fontsource family '{family}' does not support variable fonts")]
+    VariableFontNotSupported {
+        /// The font family that does not support variable fonts.
+        family: String,
+    },
+
+    /// Error when the requested variable font axis is not available for the family.
+    #[error("Variable font axis '{axis}' is not available for '{family}'")]
+    AxisNotAvailable {
+        /// The font family.
+        family: String,
+        /// The requested axis tag that was not found.
+        axis: String,
+    },
+
     /// Error when failing to create a cache directory.
     #[error("Failed to create font cache directory '{path}'")]
     CreateFontCacheDirFailed {
@@ -155,6 +171,12 @@ impl From<FontSourceError> for pyo3::PyErr {
                 field: _,
                 requested_value: _,
             } => PyValueError::new_err(format!("{value:?}")),
+            FontSourceError::VariableFontNotSupported { family: _ } => {
+                PyValueError::new_err(format!("{value:?}"))
+            }
+            FontSourceError::AxisNotAvailable { family: _, axis: _ } => {
+                PyValueError::new_err(format!("{value:?}"))
+            }
             FontSourceError::CreateFontCacheDirFailed { path: _, source: _ } => {
                 PyOSError::new_err(format!("{value:?}"))
             }
