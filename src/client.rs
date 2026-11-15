@@ -699,6 +699,19 @@ mod tests {
         include_str!("../tests/assets/family_metadata.json").replace("{{TTF_URL}}", ttf_url)
     }
 
+    fn variable_family_metadata_json() -> &'static str {
+        r#"{
+            "id": "test-family",
+            "family": "Test Family",
+            "subsets": ["cyrillic"],
+            "weights": [400],
+            "styles": ["italic"],
+            "defSubset": "latin",
+            "variable": true,
+            "variants": {}
+        }"#
+    }
+
     /// Build a client whose `FONTSOURCE_API` env-var points at the mockito server.
     fn client_for(server: &mockito::Server, tmp: &tempfile::TempDir) -> FontSourceClient {
         unsafe {
@@ -1142,6 +1155,336 @@ mod tests {
         client.download_font(&query).await.unwrap();
         // Second call uses cache – mocks would panic if hit again.
         client.download_font(&query).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn variable_metadata_is_fetched_and_cached() {
+        let mut server = mockito::Server::new_async().await;
+        let _font_list = server
+            .mock("GET", mockito::Matcher::Regex(r"fontlist".to_string()))
+            .with_status(200)
+            .with_body(font_list_json())
+            .expect(1)
+            .create_async()
+            .await;
+        let _family = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"v1/fonts/test-family".to_string()),
+            )
+            .with_status(200)
+            .with_body(variable_family_metadata_json())
+            .expect(1)
+            .create_async()
+            .await;
+        let _variable = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"v1/variable/test-family".to_string()),
+            )
+            .with_status(200)
+            .with_body(include_str!("../tests/assets/variable_metadata.json"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let client = client_for(&server, &tmp);
+
+        let first = client.variable_metadata("Test Family").await.unwrap();
+        let second = client.variable_metadata("Test Family").await.unwrap();
+
+        assert_eq!(first.family, "Inter");
+        assert_eq!(first.weight_range(), Some((100.0, 900.0)));
+        assert_eq!(second, first);
+
+        let query = QueryBuilder::new("Test Family").with_variable(true).build();
+        let cdn_css = client.css(&query).await.unwrap();
+        assert!(cdn_css.contains("font-family: 'Test Family';"));
+        assert!(cdn_css.contains("fonts/test-family:vf@latest/latin-wght-normal.woff2"));
+
+        let self_hosted_css = client.css_self_hosted(&query, "../", None).await.unwrap();
+        assert!(self_hosted_css.contains(
+            r#"url("../test-family/latin-wght-normal.woff2") format("woff2-variations")"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn variable_metadata_rejects_non_variable_family() {
+        let mut server = mockito::Server::new_async().await;
+        setup_mocks_for_download(&mut server, "http://example.com/dummy.ttf").await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = client_for(&server, &tmp);
+
+        let err = client.variable_metadata(" Test Family ").await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            FontSourceError::VariableFontNotSupported { family } if family == "Test Family"
+        ));
+    }
+
+    #[tokio::test]
+    async fn variable_download_rejects_non_variable_family() {
+        let mut server = mockito::Server::new_async().await;
+        setup_mocks_for_download(&mut server, "http://example.com/dummy.ttf").await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = client_for(&server, &tmp);
+        let query = QueryBuilder::new("Test Family").with_variable(true).build();
+
+        let err = client.download_font(&query).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            FontSourceError::VariableFontNotSupported { family } if family == "Test Family"
+        ));
+    }
+
+    #[tokio::test]
+    async fn variable_metadata_request_failed() {
+        let mut server = mockito::Server::new_async().await;
+        let _font_list = server
+            .mock("GET", mockito::Matcher::Regex(r"fontlist".to_string()))
+            .with_status(200)
+            .with_body(font_list_json())
+            .create_async()
+            .await;
+        let _family = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"v1/fonts/test-family".to_string()),
+            )
+            .with_status(200)
+            .with_body(variable_family_metadata_json())
+            .create_async()
+            .await;
+        let _variable = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"v1/variable/test-family".to_string()),
+            )
+            .with_status(500)
+            .create_async()
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = client_for(&server, &tmp);
+
+        let err = client.variable_metadata("Test Family").await.unwrap_err();
+
+        assert!(matches!(err, FontSourceError::MetadataRequestFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn variable_metadata_parse_failed() {
+        let mut server = mockito::Server::new_async().await;
+        let _font_list = server
+            .mock("GET", mockito::Matcher::Regex(r"fontlist".to_string()))
+            .with_status(200)
+            .with_body(font_list_json())
+            .create_async()
+            .await;
+        let _family = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"v1/fonts/test-family".to_string()),
+            )
+            .with_status(200)
+            .with_body(variable_family_metadata_json())
+            .create_async()
+            .await;
+        let _variable = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"v1/variable/test-family".to_string()),
+            )
+            .with_status(200)
+            .with_body("not json")
+            .create_async()
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = client_for(&server, &tmp);
+
+        let err = client.variable_metadata("Test Family").await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            FontSourceError::ParseResponseFailed {
+                task: "getting font variable metadata",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn variable_download_uses_cached_files_and_fallbacks() {
+        let mut server = mockito::Server::new_async().await;
+        let _font_list = server
+            .mock("GET", mockito::Matcher::Regex(r"fontlist".to_string()))
+            .with_status(200)
+            .with_body(font_list_json())
+            .create_async()
+            .await;
+        let _family = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"v1/fonts/test-family".to_string()),
+            )
+            .with_status(200)
+            .with_body(variable_family_metadata_json())
+            .create_async()
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = client_for(&server, &tmp);
+        let variable_metadata = VariableCacheInfo {
+            expiration: u64::MAX,
+            variable: FontSourceVariable {
+                family: "Test Family".to_string(),
+                axes: HashMap::from([(
+                    "wght".to_string(),
+                    crate::responses::VariableAxis {
+                        default: 400.0,
+                        min: 100.0,
+                        max: 900.0,
+                        step: 1.0,
+                    },
+                )]),
+            },
+        };
+        client
+            .write_cache_json_locked(
+                &client.variable_cache_path("test-family"),
+                &variable_metadata,
+            )
+            .unwrap();
+
+        let family_cache = client.family_cache_dir("test-family");
+        std::fs::create_dir_all(&family_cache).unwrap();
+        for axis in ["wght", "full", "standard"] {
+            std::fs::write(
+                family_cache.join(format!("latin-{axis}-normal.woff2")),
+                b"cached variable font",
+            )
+            .unwrap();
+        }
+
+        let query = QueryBuilder::new("Test Family")
+            .with_variable(true)
+            .with_subset("unsupported")
+            .with_style("oblique")
+            .with_axes(["wght", "full", "standard"])
+            .build();
+        let paths = client.download_font(&query).await.unwrap();
+
+        assert_eq!(paths.len(), 3);
+        assert!(paths.iter().all(|path| path.exists()));
+        assert!(paths.iter().all(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-normal.woff2")
+        }));
+
+        let matching_variant = QueryBuilder::new("Test Family")
+            .with_variable(true)
+            .with_subset("cyrillic")
+            .with_style("italic")
+            .with_axis("wght")
+            .build();
+        let matching_path = family_cache.join("cyrillic-wght-italic.woff2");
+        std::fs::write(&matching_path, b"cached variable font").unwrap();
+        let paths = client.download_font(&matching_variant).await.unwrap();
+        assert_eq!(paths, vec![matching_path]);
+
+        let family: FontSourceFamily =
+            serde_json::from_str(variable_family_metadata_json()).unwrap();
+        let paths = client
+            .download_variable_font(&family, &variable_metadata.variable, &FontQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(paths, vec![family_cache.join("latin-wght-normal.woff2")]);
+    }
+
+    #[tokio::test]
+    async fn variable_download_rejects_unavailable_axis() {
+        let mut server = mockito::Server::new_async().await;
+        let _font_list = server
+            .mock("GET", mockito::Matcher::Regex(r"fontlist".to_string()))
+            .with_status(200)
+            .with_body(font_list_json())
+            .create_async()
+            .await;
+        let _family = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"v1/fonts/test-family".to_string()),
+            )
+            .with_status(200)
+            .with_body(variable_family_metadata_json())
+            .create_async()
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = client_for(&server, &tmp);
+        let variable_metadata = VariableCacheInfo {
+            expiration: u64::MAX,
+            variable: FontSourceVariable {
+                family: "Test Family".to_string(),
+                axes: HashMap::new(),
+            },
+        };
+        client
+            .write_cache_json_locked(
+                &client.variable_cache_path("test-family"),
+                &variable_metadata,
+            )
+            .unwrap();
+        let query = QueryBuilder::new("Test Family")
+            .with_variable(true)
+            .with_axis("wdth")
+            .build();
+
+        let err = client.download_font(&query).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            FontSourceError::AxisNotAvailable { family, axis }
+                if family == "Test Family" && axis == "wdth"
+        ));
+    }
+
+    #[tokio::test]
+    async fn variable_download_cache_dir_creation_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = FontSourceClient::with_cache_root(tmp.path()).unwrap();
+        let families_cache = client.families_cache_path();
+        std::fs::create_dir_all(&families_cache).unwrap();
+        let blocked_id = families_cache.join("blocked-id");
+        std::fs::write(&blocked_id, b"not a directory").unwrap();
+
+        let family_json = variable_family_metadata_json().replace("test-family", "blocked-id");
+        let family: FontSourceFamily = serde_json::from_str(&family_json).unwrap();
+        let variable_metadata = FontSourceVariable {
+            family: family.family.clone(),
+            axes: HashMap::from([(
+                "wght".to_string(),
+                crate::responses::VariableAxis {
+                    default: 400.0,
+                    min: 100.0,
+                    max: 900.0,
+                    step: 1.0,
+                },
+            )]),
+        };
+        let query = QueryBuilder::new("Test Family").with_variable(true).build();
+
+        let err = client
+            .download_variable_font(&family, &variable_metadata, &query)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FontSourceError::CreateFontCacheDirFailed { .. }
+        ));
     }
 
     /// `collect_concurrent_tasks` maps a Tokio join failure into `ConcurrentTaskFailed`.

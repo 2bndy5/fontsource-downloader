@@ -460,4 +460,18 @@ mod tests {
         assert_eq!(loaded.expiration, 123456789);
         assert_eq!(loaded.variable.family, "Inter");
     }
+
+    #[test]
+    fn variable_cache_info_read_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client = test_client(temp_dir.path());
+        let expected_path = client.variable_cache_path("missing-family");
+
+        let err = client.variable_cache_info("missing-family").unwrap_err();
+
+        assert!(matches!(
+            err,
+            FontSourceError::ReadCacheFileFailed { path, .. } if path == expected_path
+        ));
+    }
 }
