@@ -759,7 +759,7 @@ mod tests {
         let json_with_strings = r#"{
             "family": "Inter",
             "axes": {
-                "slnt": { "default": "0", "min": "-10", "max": "0", "step": "1" },
+                "slnt": { "default": "0", "min": -10, "max": "0", "step": 0.5 },
                 "wght": { "default": 400, "min": 100, "max": 900, "step": 1 }
             }
         }"#;
@@ -778,6 +778,22 @@ mod tests {
         assert_eq!(wght.min, 100.0);
         assert_eq!(wght.max, 900.0);
         assert_eq!(wght.step, 1.0);
+
+        let slnt = parsed.get_axis("slnt").unwrap();
+        assert_eq!(slnt.min, -10.0);
+        assert_eq!(slnt.step, 0.5);
+
+        let invalid = r#"{
+            "family": "Inter",
+            "axes": {
+                "wght": { "default": null, "min": 100, "max": 900, "step": 1 }
+            }
+        }"#;
+        let err = serde_json::from_str::<FontSourceVariable>(invalid).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("a float or string representing a float")
+        );
     }
 
     #[tokio::test]
@@ -879,5 +895,150 @@ mod tests {
             err,
             FontSourceError::VariableFontNotSupported { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn variable_css_fallbacks() {
+        let mut family = test_family("");
+        family.variable = true;
+        family.subsets = vec!["cyrillic".to_string()];
+        family.weights = vec![700];
+        family.styles = vec!["italic".to_string()];
+
+        let var_meta = FontSourceVariable {
+            family: family.family.clone(),
+            axes: HashMap::new(),
+        };
+        let query = FontQuery::default();
+        let css = family
+            .to_variable_css(&query, &var_meta, None)
+            .await
+            .unwrap();
+
+        assert!(css.contains("font-style: normal;"));
+        assert!(css.contains("font-weight: 400;"));
+        assert!(css.contains(
+            r#"url("https://cdn.jsdelivr.net/fontsource/fonts/roboto:vf@latest/latin-wght-normal.woff2") format("woff2-variations")"#
+        ));
+        assert!(!css.contains("unicode-range:"));
+
+        family.weights = vec![400];
+        let css = family
+            .to_variable_css(&query, &var_meta, None)
+            .await
+            .unwrap();
+        assert!(css.contains("font-weight: 400;"));
+    }
+
+    #[tokio::test]
+    async fn variable_css_fixed_weight_and_slant_ranges() {
+        let mut family = test_family("");
+        family.variable = true;
+        family.styles = vec!["oblique".to_string()];
+
+        let mut axes = HashMap::new();
+        axes.insert(
+            "wght".to_string(),
+            VariableAxis {
+                default: 600.0,
+                min: 600.0,
+                max: 600.0,
+                step: 1.0,
+            },
+        );
+        axes.insert(
+            "slnt".to_string(),
+            VariableAxis {
+                default: -10.0,
+                min: -10.0,
+                max: -10.0,
+                step: 1.0,
+            },
+        );
+        let var_meta = FontSourceVariable {
+            family: family.family.clone(),
+            axes,
+        };
+        let query = QueryBuilder::new("Roboto")
+            .with_variable(true)
+            .with_style("oblique")
+            .build();
+        let css = family
+            .to_variable_css(&query, &var_meta, None)
+            .await
+            .unwrap();
+
+        assert!(css.contains("font-weight: 600;"));
+        assert!(css.contains("font-style: oblique -10deg;"));
+    }
+
+    #[tokio::test]
+    async fn variable_css_self_hosted_without_copy() {
+        let mut family = test_family("");
+        family.variable = true;
+
+        let var_meta = FontSourceVariable {
+            family: family.family.clone(),
+            axes: HashMap::new(),
+        };
+        let query = QueryBuilder::new("Roboto").with_variable(true).build();
+        let cache_root = tempfile::tempdir().unwrap();
+        let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
+        let css = family
+            .to_variable_css(&query, &var_meta, Some((&client, Path::new("../"), None)))
+            .await
+            .unwrap();
+
+        assert!(
+            css.contains(r#"url("../roboto/latin-wght-normal.woff2") format("woff2-variations")"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn variable_css_self_hosted_copy() {
+        let mut family = test_family("");
+        family.variable = true;
+
+        let var_meta = FontSourceVariable {
+            family: family.family.clone(),
+            axes: HashMap::new(),
+        };
+        let query = QueryBuilder::new("Roboto").with_variable(true).build();
+        let cache_root = tempfile::tempdir().unwrap();
+        let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
+
+        let font_path = client
+            .family_cache_dir(&family.id)
+            .join("latin-wght-normal.woff2");
+        fs::create_dir_all(font_path.parent().unwrap()).unwrap();
+        fs::write(&font_path, b"cached variable font").unwrap();
+
+        let export_dir = cache_root.path().join("export");
+        fs::create_dir_all(&export_dir).unwrap();
+        let destination = export_dir.join("latin-wght-normal.woff2");
+        let css = family
+            .to_variable_css(
+                &query,
+                &var_meta,
+                Some((&client, Path::new("../"), Some(&destination))),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            css.contains(r#"url("../roboto/latin-wght-normal.woff2") format("woff2-variations")"#)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"cached variable font");
+
+        let destination_dir = tempfile::tempdir().unwrap();
+        let err = family
+            .to_variable_css(
+                &query,
+                &var_meta,
+                Some((&client, Path::new("../"), Some(destination_dir.path()))),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FontSourceError::WriteFileFailed { .. }));
     }
 }

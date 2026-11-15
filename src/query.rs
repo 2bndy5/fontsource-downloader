@@ -631,6 +631,32 @@ mod tests {
     }
 
     #[test]
+    fn font_query_default_trait() {
+        let query = FontQuery::default();
+
+        assert_eq!(query.family(), "Roboto");
+        assert_eq!(
+            query.styles().map(String::as_str).collect::<Vec<_>>(),
+            vec!["normal"]
+        );
+        assert_eq!(
+            query.weights().copied().collect::<Vec<_>>(),
+            vec![Weight::Normal]
+        );
+        assert_eq!(
+            query.subsets().map(String::as_str).collect::<Vec<_>>(),
+            vec!["latin"]
+        );
+        assert_eq!(
+            query.file_types().copied().collect::<Vec<_>>(),
+            vec![FontFileType::Ttf]
+        );
+        assert!(!query.is_variable());
+        assert!(!query.append_variable_suffix());
+        assert!(query.axes().next().is_none());
+    }
+
+    #[test]
     fn variable_query_builder() {
         let query = QueryBuilder::new("Inter")
             .with_variable(true)
