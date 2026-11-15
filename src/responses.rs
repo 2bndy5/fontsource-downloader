@@ -1,7 +1,11 @@
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -257,6 +261,7 @@ impl FontSourceFamily {
         &self,
         query: &FontQuery,
         var_meta: &FontSourceVariable,
+        axis_registry: Option<&HashSet<String>>,
         client_dest: Option<(&FontSourceClient, &Path, Option<&Path>)>,
     ) -> Result<String> {
         if !self.is_variable() {
@@ -265,7 +270,7 @@ impl FontSourceFamily {
             });
         }
         query.validate_variable_file_type()?;
-        var_meta.validate_query_axes(&self.family, query)?;
+        let axis = var_meta.variable_resource_axis(&self.family, query, axis_registry)?;
 
         let mut result = String::new();
         let mut download_tasks = JoinSet::new();
@@ -281,8 +286,6 @@ impl FontSourceFamily {
         } else {
             filtered_styles.into_iter().map(|s| s.as_str()).collect()
         };
-
-        let axis = query.variable_resource_axis();
 
         let family_name = if query.append_variable_suffix()
             && !self.family.to_lowercase().ends_with(" variable")
@@ -579,6 +582,21 @@ impl FontSourceVariable {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn variable_resource_axis(
+        &self,
+        family: &str,
+        query: &FontQuery,
+        axis_registry: Option<&HashSet<String>>,
+    ) -> Result<String> {
+        self.validate_query_axes(family, query)?;
+        let available_axes = self
+            .axes
+            .keys()
+            .map(|axis| axis.to_lowercase())
+            .collect::<HashSet<_>>();
+        query.variable_resource_axis(&available_axes, axis_registry)
     }
 
     /// Get the axis metadata for a given tag.
@@ -879,7 +897,7 @@ mod tests {
         // 1. Basic CDN variable CSS without suffix
         let query_basic = QueryBuilder::new("Inter").with_variable(true).build();
         let css_basic = family
-            .to_variable_css(&query_basic, &var_meta, None)
+            .to_variable_css(&query_basic, &var_meta, None, None)
             .await
             .unwrap();
 
@@ -895,8 +913,15 @@ mod tests {
             .with_variable(true)
             .with_axes(["wght", "slnt"])
             .build();
+        let axis_registry = HashSet::from([
+            "ital".to_string(),
+            "opsz".to_string(),
+            "slnt".to_string(),
+            "wght".to_string(),
+            "wdth".to_string(),
+        ]);
         let css_multiple_axes = family
-            .to_variable_css(&query_multiple_axes, &var_meta, None)
+            .to_variable_css(&query_multiple_axes, &var_meta, Some(&axis_registry), None)
             .await
             .unwrap();
         assert_eq!(css_multiple_axes.matches("@font-face").count(), 1);
@@ -911,7 +936,7 @@ mod tests {
             .with_axis("full")
             .build();
         let css_full_axes = family
-            .to_variable_css(&query_full_axes, &var_meta, None)
+            .to_variable_css(&query_full_axes, &var_meta, None, None)
             .await
             .unwrap();
         assert!(css_full_axes.contains("latin-full-normal.woff2"));
@@ -922,7 +947,7 @@ mod tests {
             .with_variable_suffix(true)
             .build();
         let css_suffix = family
-            .to_variable_css(&query_suffix, &var_meta, None)
+            .to_variable_css(&query_suffix, &var_meta, None, None)
             .await
             .unwrap();
         assert!(css_suffix.contains("font-family: 'Inter Variable';"));
@@ -931,7 +956,7 @@ mod tests {
         let mut fam_with_var = family.clone();
         fam_with_var.family = "Inter Variable".to_string();
         let css_no_double = fam_with_var
-            .to_variable_css(&query_suffix, &var_meta, None)
+            .to_variable_css(&query_suffix, &var_meta, None, None)
             .await
             .unwrap();
         assert!(css_no_double.contains("font-family: 'Inter Variable';"));
@@ -943,7 +968,7 @@ mod tests {
             .with_style("oblique")
             .build();
         let css_oblique = family
-            .to_variable_css(&query_oblique, &var_meta, None)
+            .to_variable_css(&query_oblique, &var_meta, None, None)
             .await
             .unwrap();
         assert!(css_oblique.contains("font-style: oblique -0.25deg 10.5deg;"));
@@ -952,7 +977,7 @@ mod tests {
         let mut non_var_family = family.clone();
         non_var_family.variable = false;
         let err = non_var_family
-            .to_variable_css(&query_basic, &var_meta, None)
+            .to_variable_css(&query_basic, &var_meta, None, None)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -978,7 +1003,7 @@ mod tests {
             .with_axis("full")
             .build();
         let css = family
-            .to_variable_css(&query, &var_meta, None)
+            .to_variable_css(&query, &var_meta, None, None)
             .await
             .unwrap();
 
@@ -991,7 +1016,7 @@ mod tests {
 
         family.weights = vec![400];
         let css = family
-            .to_variable_css(&query, &var_meta, None)
+            .to_variable_css(&query, &var_meta, None, None)
             .await
             .unwrap();
         assert!(css.contains("font-weight: 400;"));
@@ -1031,7 +1056,7 @@ mod tests {
             .with_style("oblique")
             .build();
         let css = family
-            .to_variable_css(&query, &var_meta, None)
+            .to_variable_css(&query, &var_meta, None, None)
             .await
             .unwrap();
 
@@ -1061,7 +1086,7 @@ mod tests {
             .build();
 
         let err = family
-            .to_variable_css(&query, &var_meta, None)
+            .to_variable_css(&query, &var_meta, None, None)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1073,7 +1098,12 @@ mod tests {
         let cache_root = tempfile::tempdir().unwrap();
         let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
         let err = family
-            .to_variable_css(&query, &var_meta, Some((&client, Path::new(""), None)))
+            .to_variable_css(
+                &query,
+                &var_meta,
+                None,
+                Some((&client, Path::new(""), None)),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1105,7 +1135,7 @@ mod tests {
             .build();
 
         let err = family
-            .to_variable_css(&query, &var_meta, None)
+            .to_variable_css(&query, &var_meta, None, None)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1120,7 +1150,12 @@ mod tests {
         let cache_root = tempfile::tempdir().unwrap();
         let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
         let err = family
-            .to_variable_css(&query, &var_meta, Some((&client, Path::new(""), None)))
+            .to_variable_css(
+                &query,
+                &var_meta,
+                None,
+                Some((&client, Path::new(""), None)),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1138,7 +1173,7 @@ mod tests {
             .with_file_type(FontFileType::Woff2)
             .build();
         let css = family
-            .to_variable_css(&query_with_woff2, &var_meta, None)
+            .to_variable_css(&query_with_woff2, &var_meta, None, None)
             .await
             .unwrap();
         assert!(css.contains("format(\"woff2-variations\")"));
@@ -1165,7 +1200,12 @@ mod tests {
         let cache_root = tempfile::tempdir().unwrap();
         let client = FontSourceClient::with_cache_root(cache_root.path()).unwrap();
         let css = family
-            .to_variable_css(&query, &var_meta, Some((&client, Path::new("../"), None)))
+            .to_variable_css(
+                &query,
+                &var_meta,
+                None,
+                Some((&client, Path::new("../"), None)),
+            )
             .await
             .unwrap();
 
@@ -1208,6 +1248,7 @@ mod tests {
             .to_variable_css(
                 &query,
                 &var_meta,
+                None,
                 Some((&client, Path::new("../"), Some(&export_dir))),
             )
             .await
@@ -1230,6 +1271,7 @@ mod tests {
             .to_variable_css(
                 &query,
                 &var_meta,
+                None,
                 Some((&client, Path::new("../"), Some(destination_dir.path()))),
             )
             .await

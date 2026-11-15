@@ -211,8 +211,9 @@ impl QueryBuilder {
 
     /// Add multiple targeted variable font axes.
     ///
-    /// Multiple standard axes use Fontsource's `"standard"` resource; combinations that
-    /// include custom axes use its `"full"` resource.
+    /// Multiple registered standard axes use Fontsource's `"standard"` resource when the
+    /// family publishes all selected axes. Combinations that include custom axes are rejected
+    /// because the API metadata does not confirm a combined resource for them.
     pub fn with_axes<I, S>(self, axes: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -317,25 +318,88 @@ impl FontQuery {
         self.axes.iter()
     }
 
-    pub(crate) fn variable_resource_axis(&self) -> String {
-        let mut axes = self.axes.iter();
-        let Some(axis) = axes.next() else {
-            return "wght".to_string();
+    pub(crate) fn variable_resource_axis(
+        &self,
+        available_axes: &HashSet<String>,
+        axis_registry: Option<&HashSet<String>>,
+    ) -> Result<String> {
+        const STANDARD_AXES: [&str; 5] = ["ital", "opsz", "slnt", "wght", "wdth"];
+
+        if self.axes.contains("full") {
+            return Ok("full".to_string());
+        }
+
+        let mut axes = self
+            .axes
+            .iter()
+            .filter(|axis| axis.as_str() != "standard")
+            .cloned()
+            .collect::<Vec<_>>();
+        axes.sort();
+
+        if axes.is_empty() && !self.axes.contains("standard") {
+            return Ok("wght".to_string());
+        }
+
+        let published_standard_axes = axis_registry.map(|registry| {
+            available_axes
+                .iter()
+                .filter(|axis| {
+                    STANDARD_AXES.contains(&axis.as_str())
+                        && registry
+                            .iter()
+                            .any(|registered| registered.eq_ignore_ascii_case(axis))
+                })
+                .cloned()
+                .collect::<HashSet<_>>()
+        });
+        let is_published_standard_axis = |axis: &str| {
+            published_standard_axes
+                .as_ref()
+                .is_some_and(|published| published.contains(&axis.to_lowercase()))
         };
-        if axes.next().is_none() {
-            return axis.clone();
+        let all_axes_are_published_standard =
+            !axes.is_empty() && axes.iter().all(|axis| is_published_standard_axis(axis));
+
+        if self.axes.contains("standard") {
+            if axes.is_empty() {
+                if published_standard_axes
+                    .as_ref()
+                    .is_some_and(|published| !published.is_empty())
+                {
+                    return Ok("standard".to_string());
+                }
+            } else if all_axes_are_published_standard {
+                return Ok("standard".to_string());
+            }
+        } else if axes.len() == 1 {
+            return Ok(axes.remove(0));
+        } else if all_axes_are_published_standard {
+            return Ok("standard".to_string());
         }
-        if self.axes.contains("full")
-            || self.axes.iter().any(|axis| {
-                !matches!(
-                    axis.as_str(),
-                    "standard" | "wght" | "wdth" | "slnt" | "opsz" | "ital"
-                )
-            })
-        {
-            return "full".to_string();
+
+        Err(FontSourceError::FontVariantNotAvailable {
+            family: self.family.clone(),
+            field: "axes",
+            requested_value: if axes.is_empty() {
+                "standard".to_string()
+            } else {
+                axes.join(",")
+            },
+        })
+    }
+
+    pub(crate) fn requires_axis_registry(&self) -> bool {
+        if self.axes.contains("full") {
+            return false;
         }
-        "standard".to_string()
+        self.axes.contains("standard")
+            || self
+                .axes
+                .iter()
+                .filter(|axis| axis.as_str() != "standard")
+                .count()
+                > 1
     }
 
     pub(crate) fn validate_variable_file_type(&self) -> Result<()> {
@@ -591,6 +655,8 @@ impl Weight {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -730,31 +796,75 @@ mod tests {
 
     #[test]
     fn variable_resource_axis_selection() {
+        let available_axes = HashSet::from([
+            "ital".to_string(),
+            "opsz".to_string(),
+            "wght".to_string(),
+            "wdth".to_string(),
+            "grad".to_string(),
+        ]);
+        let axis_registry = HashSet::from([
+            "ital".to_string(),
+            "opsz".to_string(),
+            "slnt".to_string(),
+            "wght".to_string(),
+            "wdth".to_string(),
+            "GRAD".to_string(),
+        ]);
         let query = FontQuery::default();
-        assert_eq!(query.variable_resource_axis(), "wght");
+        assert_eq!(
+            query.variable_resource_axis(&available_axes, None).unwrap(),
+            "wght"
+        );
 
         let query = QueryBuilder::new("Inter")
             .with_variable(true)
             .with_axis("wdth")
             .build();
-        assert_eq!(query.variable_resource_axis(), "wdth");
+        assert_eq!(
+            query.variable_resource_axis(&available_axes, None).unwrap(),
+            "wdth"
+        );
 
         let query = QueryBuilder::new("Inter")
             .with_variable(true)
             .with_axes(["wght", "wdth", "ital"])
             .build();
-        assert_eq!(query.variable_resource_axis(), "standard");
+        assert_eq!(
+            query
+                .variable_resource_axis(&available_axes, Some(&axis_registry))
+                .unwrap(),
+            "standard"
+        );
 
         let query = QueryBuilder::new("Inter")
             .with_variable(true)
             .with_axes(["wght", "GRAD"])
             .build();
-        assert_eq!(query.variable_resource_axis(), "full");
+        assert!(matches!(
+            query.variable_resource_axis(&available_axes, Some(&axis_registry)),
+            Err(FontSourceError::FontVariantNotAvailable { field: "axes", .. })
+        ));
 
         let query = QueryBuilder::new("Inter")
             .with_variable(true)
             .with_axes(["wght", "standard"])
             .build();
-        assert_eq!(query.variable_resource_axis(), "standard");
+        assert_eq!(
+            query
+                .variable_resource_axis(&available_axes, Some(&axis_registry))
+                .unwrap(),
+            "standard"
+        );
+
+        let unavailable_standard_axis = HashSet::from(["ital".to_string()]);
+        let query = QueryBuilder::new("Inter")
+            .with_variable(true)
+            .with_axes(["wght", "wdth"])
+            .build();
+        assert!(matches!(
+            query.variable_resource_axis(&unavailable_standard_axis, Some(&axis_registry)),
+            Err(FontSourceError::FontVariantNotAvailable { field: "axes", .. })
+        ));
     }
 }

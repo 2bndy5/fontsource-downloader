@@ -5,16 +5,16 @@ use reqwest::{Client, ClientBuilder};
 use tokio::task::JoinSet;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 
 use crate::{
     caching::{
-        CACHE_LOCK_EXT, DEFAULT_METADATA_TTL, FAMILY_CACHE_FILE, FamilyCacheInfo,
-        FontListCacheInfo, VariableCacheInfo, default_cache_root, expires_at, now_unix,
-        open_lock_file, parse_max_age,
+        AXIS_REGISTRY_CACHE_FILE, AxisRegistryCacheInfo, CACHE_LOCK_EXT, DEFAULT_METADATA_TTL,
+        FAMILY_CACHE_FILE, FamilyCacheInfo, FontListCacheInfo, VariableCacheInfo,
+        default_cache_root, expires_at, now_unix, open_lock_file, parse_max_age,
     },
     error::{FontSourceError, Result},
     query::FontQuery,
@@ -26,6 +26,7 @@ const FONTSOURCE_API: &str = "https://api.fontsource.org/";
 
 const FONTSOURCE_FONT_URL_PATH: &str = "v1/fonts/";
 const FONTSOURCE_VARIABLE_URL_PATH: &str = "v1/variable/";
+const FONTSOURCE_AXIS_REGISTRY_PATH: &str = "v1/axis-registry";
 const FONTSOURCE_FONT_LIST_PATH: &str = "fontlist?family";
 
 /// A client for downloading (and caching) font files from Fontsource.
@@ -287,6 +288,7 @@ impl FontSourceClient {
         query: &FontQuery,
     ) -> Result<Vec<PathBuf>> {
         query.validate_variable_file_type()?;
+        var_meta.validate_query_axes(&family.family, query)?;
 
         let mut subsets = query.filter_subsets(&family.subsets);
         if subsets.is_empty() {
@@ -300,8 +302,13 @@ impl FontSourceClient {
             filtered_styles.into_iter().map(|s| s.as_str()).collect()
         };
 
-        let axis = query.variable_resource_axis();
-        var_meta.validate_query_axes(&family.family, query)?;
+        let axis_registry = if query.requires_axis_registry() {
+            Some(self.load_axis_registry().await?)
+        } else {
+            None
+        };
+        let axis =
+            var_meta.variable_resource_axis(&family.family, query, axis_registry.as_ref())?;
 
         let family_cache_dir = self.family_cache_dir(&family.id);
         fs::create_dir_all(&family_cache_dir).map_err(|source| {
@@ -551,6 +558,66 @@ impl FontSourceClient {
         Ok(cache_payload.variable)
     }
 
+    async fn load_axis_registry(&self) -> Result<HashSet<String>> {
+        let cache_path = self.cache_dir.join(AXIS_REGISTRY_CACHE_FILE);
+        let cached = fs::read_to_string(&cache_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<AxisRegistryCacheInfo>(&raw).ok())
+            .filter(|cached| cached.expiration > now_unix());
+        if let Some(cached) = cached {
+            return Ok(cached.axes);
+        }
+
+        #[cfg(not(test))]
+        let registry_url = format!("{FONTSOURCE_API}{FONTSOURCE_AXIS_REGISTRY_PATH}");
+        #[cfg(test)]
+        #[allow(clippy::unwrap_used, reason = "tests should panic on missing env var")]
+        let registry_url = format!(
+            "{}{FONTSOURCE_AXIS_REGISTRY_PATH}",
+            std::env::var("FONTSOURCE_API").unwrap()
+        );
+
+        let response = self
+            .client
+            .get(&registry_url)
+            .send()
+            .await
+            .map_err(|source| FontSourceError::MetadataRequestFailed {
+                request: "getting the variable font axis registry".to_string(),
+                source,
+            })?
+            .error_for_status()
+            .map_err(|source| FontSourceError::MetadataRequestFailed {
+                request: "getting the variable font axis registry".to_string(),
+                source,
+            })?;
+        let ttl = parse_max_age(response.headers().get(reqwest::header::CACHE_CONTROL))
+            .unwrap_or(DEFAULT_METADATA_TTL);
+        let registry: HashMap<String, serde_json::Value> = serde_json::from_str(
+            response
+                .text()
+                .await
+                .map_err(|source| FontSourceError::MetadataDecodeFailed {
+                    request: "getting the variable font axis registry".to_string(),
+                    source,
+                })?
+                .as_str(),
+        )
+        .map_err(|source| FontSourceError::ParseResponseFailed {
+            task: "getting the variable font axis registry",
+            source,
+        })?;
+        let cache_payload = AxisRegistryCacheInfo {
+            expiration: expires_at(ttl),
+            axes: registry
+                .into_keys()
+                .map(|axis| axis.to_lowercase())
+                .collect(),
+        };
+        self.write_cache_json_locked(&cache_path, &cache_payload)?;
+        Ok(cache_payload.axes)
+    }
+
     /// Load the list of font families and return the ID corresponding to the given `family` name.
     async fn load_font_list_families(&self, family: &str) -> Result<Option<String>> {
         if let Some(cached) = self
@@ -622,7 +689,16 @@ impl FontSourceClient {
         let family = self.load_family_metadata(query.family()).await?;
         if query.is_variable() {
             let var_meta = self.load_variable_metadata(query.family()).await?;
-            return family.to_variable_css(query, &var_meta, None).await;
+            query.validate_variable_file_type()?;
+            var_meta.validate_query_axes(&family.family, query)?;
+            let axis_registry = if query.requires_axis_registry() {
+                Some(self.load_axis_registry().await?)
+            } else {
+                None
+            };
+            return family
+                .to_variable_css(query, &var_meta, axis_registry.as_ref(), None)
+                .await;
         }
         family.to_css(query, None).await
     }
@@ -654,10 +730,18 @@ impl FontSourceClient {
         let family = self.load_family_metadata(query.family()).await?;
         if query.is_variable() {
             let var_meta = self.load_variable_metadata(query.family()).await?;
+            query.validate_variable_file_type()?;
+            var_meta.validate_query_axes(&family.family, query)?;
+            let axis_registry = if query.requires_axis_registry() {
+                Some(self.load_axis_registry().await?)
+            } else {
+                None
+            };
             return family
                 .to_variable_css(
                     query,
                     &var_meta,
+                    axis_registry.as_ref(),
                     Some((self, Path::new(relative_url_prefix), dest)),
                 )
                 .await;
@@ -1175,6 +1259,13 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
+        let _axis_registry = server
+            .mock("GET", "/v1/axis-registry")
+            .with_status(200)
+            .with_body(r#"{"wght":{},"slnt":{}}"#)
+            .expect(1)
+            .create_async()
+            .await;
 
         let tmp = tempfile::tempdir().unwrap();
         let client = client_for(&server, &tmp);
@@ -1195,6 +1286,18 @@ mod tests {
         assert!(self_hosted_css.contains(
             r#"url("../test-family/latin-wght-normal.woff2") format("woff2-variations")"#
         ));
+
+        let multi_axis_query = QueryBuilder::new("Test Family")
+            .with_variable(true)
+            .with_axes(["wght", "slnt"])
+            .build();
+        let multi_axis_css = client.css(&multi_axis_query).await.unwrap();
+        assert!(multi_axis_css.contains("latin-standard-normal.woff2"));
+        let multi_axis_self_hosted = client
+            .css_self_hosted(&multi_axis_query, "../", None)
+            .await
+            .unwrap();
+        assert!(multi_axis_self_hosted.contains("latin-standard-normal.woff2"));
     }
 
     #[tokio::test]

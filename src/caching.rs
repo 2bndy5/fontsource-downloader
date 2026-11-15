@@ -2,7 +2,7 @@
 use pyo3::prelude::*;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -21,6 +21,7 @@ pub(crate) const DEFAULT_METADATA_TTL: Duration = Duration::from_hours(24);
 const FONT_LIST_CACHE_FILE: &str = "fontsource-family-list-cache.json";
 pub(crate) const FAMILY_CACHE_FILE: &str = "family-metadata-cache.json";
 pub(crate) const VARIABLE_CACHE_FILE: &str = "variable-metadata-cache.json";
+pub(crate) const AXIS_REGISTRY_CACHE_FILE: &str = "axis-registry-cache.json";
 pub(crate) const CACHE_LOCK_EXT: &str = "lock";
 
 /// The cached list of font families.
@@ -80,6 +81,12 @@ pub struct VariableCacheInfo {
     pub expiration: u64,
     /// The variable font metadata for the font family.
     pub variable: FontSourceVariable,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AxisRegistryCacheInfo {
+    pub expiration: u64,
+    pub axes: HashSet<String>,
 }
 
 impl FontSourceClient {

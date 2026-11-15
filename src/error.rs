@@ -47,7 +47,7 @@ pub enum FontSourceError {
         family: String,
         /// The field of the font variant for which the requested weight is not available.
         ///
-        /// E.g. weight, style, subset
+        /// E.g. weight, style, subset, or an unsupported variable-axis combination.
         field: &'static str,
         /// The requested value (as a string) that is not available for the requested family.
         requested_value: String,
